@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/* SyncCostX Pro Design Tokens */
+:root {
+  /* Shell */
+  --color-shell-bg: #0f1923;
+  --color-shell-border: #1e2d3d;
+  --color-shell-text: #e2e8f0;
+  --color-shell-muted: #7a8fa6;
+  --color-shell-active: #2563eb;
+
+  /* Content surface */
+  --color-surface: #ffffff;
+  --color-surface-subtle: #f8f9fa;
+  --color-border: #e5e7eb;
+  --color-text-primary: #111827;
+  --color-text-secondary: #6b7280;
+  --color-text-muted: #9ca3af;
+
+  /* Semantic */
+  --color-accent: #2563eb;
+  --color-success: #16a34a;
+  --color-warning: #f59e0b;
+  --color-danger: #dc2626;
+
+  /* Badge */
+  --color-badge-complete: #d1fae5;
+  --color-badge-complete-text: #065f46;
+  --color-badge-partial: #fef3c7;
+  --color-badge-partial-text: #92400e;
+}
+
+body {
+  font-family: 'Inter', 'DM Sans', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--color-surface-subtle);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* Data grid */
+.data-grid { border-collapse: collapse; font-size: 13px; line-height: 1.4; }
+.data-grid th, .data-grid td { padding: 12px 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.data-grid tbody tr { height: 44px; border-bottom: 1px solid var(--color-border); }
+.data-grid tbody tr:hover { background: #f9fafb; }
+.data-grid th { position: sticky; top: 0; background: var(--color-surface-subtle); font-weight: 600; color: var(--color-text-primary); font-size: 13px; border-bottom: 2px solid var(--color-border); }

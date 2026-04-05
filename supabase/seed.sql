@@ -1,0 +1,31 @@
+-- Dev seed data for BidBase
+-- Run after migrations to populate test data
+
+-- Note: Plans are already seeded in migration 00010
+-- This file provides additional dev data
+
+-- Placeholder: In development, create a test organisation and user
+-- via the Supabase Auth dashboard or the /api/auth/register endpoint.
+-- The trigger on auth.users will auto-create the profile.
+-- Then use the API to create the organisation and link the profile.
+
+-- Example manual seed (uncomment and adjust for local dev):
+--
+-- INSERT INTO organisations (id, name, slug, plan, active, onboarding_complete)
+-- VALUES (
+--   'a0000000-0000-0000-0000-000000000001',
+--   'Test Bid Writing Co',
+--   'test-bwc',
+--   'professional',
+--   true,
+--   true
+-- );
+--
+-- UPDATE profiles
+-- SET organisation_id = 'a0000000-0000-0000-0000-000000000001',
+--     role = 'org_admin',
+--     full_name = 'Test Admin'
+-- WHERE id = '<your-auth-user-id>';
+--
+-- INSERT INTO plan_usage (organisation_id)
+-- VALUES ('a0000000-0000-0000-0000-000000000001');
