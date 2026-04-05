@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../../lib/api';
+import { api, API_BASE } from '../../lib/api';
 import { useSessionStore } from '../../stores/session';
 import type { Client, Application, AgentType } from '@shared/types/database';
 import CommandCenter from '../../components/agents/CommandCenter';
@@ -439,7 +439,7 @@ export default function AgentWorkspacePage() {
       abortRef.current = abortController;
 
       try {
-        const response = await fetch(`/api/agents/${selectedAgent.type}/message`, {
+        const response = await fetch(`${API_BASE}/agents/${selectedAgent.type}/message`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

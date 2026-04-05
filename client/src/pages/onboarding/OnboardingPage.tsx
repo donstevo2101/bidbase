@@ -1,3 +1,4 @@
+import { API_BASE } from '../../lib/api';
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
@@ -88,7 +89,7 @@ export default function OnboardingPage() {
 
     try {
       // POST directly with fetch since user may not have org_id in session yet
-      const res = await fetch('/api/organisations', {
+      const res = await fetch(`${API_BASE}/organisations`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -104,7 +105,7 @@ export default function OnboardingPage() {
       }
 
       // Refetch /api/auth/me to get the updated session with org data
-      const meRes = await fetch('/api/auth/me', {
+      const meRes = await fetch(`${API_BASE}/auth/me`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       const meResult = await meRes.json();

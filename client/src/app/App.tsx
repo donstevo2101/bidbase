@@ -29,6 +29,7 @@ import AdminEnquiriesPage from '../pages/admin/AdminEnquiriesPage';
 import EnterpriseLandingPage from '../pages/enterprise/EnterpriseLandingPage';
 import { useSessionStore } from '../stores/session';
 import { supabase } from '../lib/supabase';
+import { API_BASE } from '../lib/api';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,7 +48,7 @@ function AuthInit() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) {
         // Fetch profile
-        fetch('/api/auth/me', {
+        fetch(`${API_BASE}/auth/me`, {
           headers: { Authorization: `Bearer ${session.access_token}` },
         })
           .then((r) => r.json())

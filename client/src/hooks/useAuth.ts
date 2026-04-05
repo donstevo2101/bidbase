@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../lib/api';
+import { api, API_BASE } from '../lib/api';
 import { useSessionStore } from '../stores/session';
 
 export function useAuth() {
@@ -28,7 +28,7 @@ export function useAuth() {
     const token = result.data.accessToken;
 
     // Fetch full profile with org data — pass token directly since store isn't set yet
-    const meRes = await fetch('/api/auth/me', {
+    const meRes = await fetch(`${API_BASE}/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const meResult = await meRes.json();

@@ -1,3 +1,4 @@
+import { API_BASE } from '../../lib/api';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -59,7 +60,7 @@ export default function EnterpriseLandingPage() {
     setSubmitting(true);
 
     try {
-      const res = await fetch('/api/enterprise/enquiry', {
+      const res = await fetch(`${API_BASE}/enterprise/enquiry`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

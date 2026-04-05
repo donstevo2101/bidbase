@@ -1,3 +1,4 @@
+import { API_BASE } from '../../lib/api';
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../lib/api';
@@ -60,7 +61,7 @@ export default function DailyReportPanel() {
     setDownloadError(null);
     setDownloading(true);
     try {
-      const response = await fetch('/api/reports/daily', {
+      const response = await fetch(`${API_BASE}/reports/daily`, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${(await import('../../stores/session')).useSessionStore.getState().accessToken ?? ''}`,
