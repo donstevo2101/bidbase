@@ -264,11 +264,27 @@ export default function ClientCreatePage() {
     setProcessingError(null);
 
     try {
-      const content = await file.text();
+      // Read file — use base64 for binary files (PDF, images), text for plain text
+      let content: string;
+      const isTextFile = file.type.startsWith('text/') || file.name.endsWith('.txt') || file.name.endsWith('.csv');
+
+      if (isTextFile) {
+        content = await file.text();
+      } else {
+        // Read as base64 for PDFs, Word docs, images
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]!);
+        }
+        content = btoa(binary);
+      }
+
       const result = await api.post<ParsedClientData>('/client-parser/parse-document', {
         content,
         fileName: file.name,
-        mimeType: file.type,
+        mimeType: file.type || 'application/octet-stream',
       });
 
       if (!result.success) {
@@ -279,7 +295,9 @@ export default function ClientCreatePage() {
       initConfirmedFields(result.data);
       setStep('field-confirm');
     } catch (err) {
-      setProcessingError(err instanceof Error ? err.message : 'Failed to parse document');
+      console.error('[ClientParser] Document parse error:', err);
+      setProcessingError(err instanceof Error ? err.message : 'Failed to parse document. Please try a different file format or use voice input.');
+      setStep('processing'); // Stay on processing step to show the error
     } finally {
       setIsProcessing(false);
     }
@@ -665,7 +683,7 @@ export default function ClientCreatePage() {
           ref={fileInputRef}
           type="file"
           className="hidden"
-          accept=".pdf,.doc,.docx,.txt,.rtf"
+          accept=".pdf,.doc,.docx,.txt,.rtf,.csv,.png,.jpg,.jpeg"
           onChange={onFileSelect}
         />
       </div>

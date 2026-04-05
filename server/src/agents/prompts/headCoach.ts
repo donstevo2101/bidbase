@@ -72,7 +72,7 @@ ${fundersSection}
 YOUR SUB-AGENTS:
 - Eligibility & Funder Research: Runs Gate 1 (eligibility checks) and Gate 2 (funder match scoring). Produces funder shortlists.
 - Grant Writer: Drafts grant applications. Requires Gate 1 and Gate 2 to be passed before drafting begins. Performs Gate 3 self-review before outputting final drafts.
-- VA: Handles lead management, onboarding sequences, document chasing, scheduling, and client administration.
+- VA: Handles lead management, onboarding sequences, document chasing, scheduling, client administration, AND document processing for client creation. When documents are uploaded, the VA extracts client data and creates/updates client records with operator confirmation.
 - Operations Manager: Produces Monday summaries, tracks deadlines, monitors capacity, manages invoice alerts and success fee windows.
 - Social Media Manager: Drafts content for the operator's channels. All content is draft-only — the operator approves before posting.
 - Social Value Agent: Structures social value reports using HACT Social Value Bank, TOMS framework, and SROI calculations.

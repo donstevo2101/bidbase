@@ -8,6 +8,8 @@ import { validate } from '../middleware/validate.js';
 import { parseDocumentForClient, parseVoiceForClient } from '../agents/clientParser.js';
 import type { ParsedClientData } from '../agents/clientParser.js';
 import type { Request, Response, NextFunction } from 'express';
+import pdfParse from 'pdf-parse';
+import mammoth from 'mammoth';
 
 export const clientParserRouter = Router();
 
@@ -174,24 +176,68 @@ Include a confidence score (0-100) for every field returned.`,
       return;
     }
 
-    // PDF files — in a production system, use pdf-parse or similar to extract text
-    // from the binary. For now, we accept pre-extracted text content.
-    // TODO: Integrate pdf-parse for proper PDF text extraction from base64 content
-    if (mimeType === 'application/pdf') {
-      // Attempt to use the content as-is (assumes caller sent extracted text)
-      // A real implementation would decode the base64 and run it through pdf-parse
-    }
-
-    // Plain text, CSV, and pre-extracted PDF text — parse directly
+    // Determine text content from the file
     let textContent = content;
 
-    // If content looks like base64 (no spaces, long alphanumeric), try decoding
-    if (/^[A-Za-z0-9+/=]+$/.test(content) && content.length > 100) {
+    // PDF files — decode base64 and extract text with pdf-parse
+    if (mimeType === 'application/pdf' || fileName.toLowerCase().endsWith('.pdf')) {
+      try {
+        const pdfBuffer = Buffer.from(content, 'base64');
+        const pdfData = await pdfParse(pdfBuffer);
+        textContent = pdfData.text;
+        if (!textContent.trim()) {
+          res.status(422).json({
+            success: false,
+            error: { code: 'EMPTY_PDF', message: 'Could not extract text from this PDF. It may be an image-only PDF.' },
+          });
+          return;
+        }
+      } catch {
+        res.status(422).json({
+          success: false,
+          error: { code: 'PDF_PARSE_FAILED', message: 'Failed to read this PDF file. Please try a text file or use voice input.' },
+        });
+        return;
+      }
+    }
+    // Word docs — use mammoth to extract text from .docx / .doc
+    else if (mimeType.includes('word') || fileName.toLowerCase().endsWith('.docx') || fileName.toLowerCase().endsWith('.doc')) {
+      try {
+        const docBuffer = Buffer.from(content, 'base64');
+        const result = await mammoth.extractRawText({ buffer: docBuffer });
+        textContent = result.value;
+        if (!textContent.trim()) {
+          res.status(422).json({
+            success: false,
+            error: { code: 'EMPTY_DOC', message: 'Could not extract text from this Word document. The file may be empty or corrupted.' },
+          });
+          return;
+        }
+      } catch (docErr) {
+        console.error('[ClientParser] Word doc parse error:', docErr);
+        res.status(422).json({
+          success: false,
+          error: { code: 'DOC_PARSE_FAILED', message: 'Failed to read this Word file. Please try a .docx, PDF, or text file instead.' },
+        });
+        return;
+      }
+    }
+    // Base64-encoded content (non-text files sent as base64)
+    else if (/^[A-Za-z0-9+/=]+$/.test(content) && content.length > 200 && !content.includes(' ')) {
       try {
         textContent = Buffer.from(content, 'base64').toString('utf-8');
       } catch {
         // Not valid base64 — use as-is
       }
+    }
+    // Plain text — use directly
+
+    if (!textContent.trim()) {
+      res.status(422).json({
+        success: false,
+        error: { code: 'EMPTY_CONTENT', message: 'No text could be extracted from this file.' },
+      });
+      return;
     }
 
     try {

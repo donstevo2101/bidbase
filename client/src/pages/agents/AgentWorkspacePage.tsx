@@ -221,6 +221,11 @@ export default function AgentWorkspacePage() {
   const [contextPanelOpen, setContextPanelOpen] = useState(true);
   const [isListening, setIsListening] = useState(false);
 
+  // File upload state
+  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const fileUploadRef = useRef<HTMLInputElement>(null);
+
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -581,6 +586,78 @@ export default function AgentWorkspacePage() {
     },
     [inputValue, isStreaming, messages, selectedAgent.type, selectedClientId, selectedApplicationId, accessToken, refetchConversations],
   );
+
+  // -----------------------------------------------------------------------
+  // Document upload for agent chat
+  // -----------------------------------------------------------------------
+
+  const handleAgentFileUpload = useCallback(async (file: File) => {
+    setIsUploading(true);
+    setUploadedFileName(file.name);
+
+    try {
+      let content: string;
+      const isTextFile = file.type.startsWith('text/') || file.name.endsWith('.txt') || file.name.endsWith('.csv');
+
+      if (isTextFile) {
+        content = await file.text();
+      } else {
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]!);
+        }
+        content = btoa(binary);
+      }
+
+      const result = await api.post<{
+        name?: string;
+        type?: string;
+        primaryContactName?: string;
+        primaryContactEmail?: string;
+        primaryContactPhone?: string;
+        annualIncome?: number;
+        registeredNumber?: string;
+        address?: Record<string, string>;
+        policiesHeld?: string[];
+        notes?: string;
+      }>('/client-parser/parse-document', {
+        content,
+        fileName: file.name,
+        mimeType: file.type || 'application/octet-stream',
+      });
+
+      if (!result.success) {
+        throw new Error(result.error.message);
+      }
+
+      const extracted = result.data;
+      const lines: string[] = [`I've uploaded and analysed "${file.name}". Here's what I extracted:\n`];
+      if (extracted.name) lines.push(`Organisation: ${extracted.name}`);
+      if (extracted.type) lines.push(`Type: ${extracted.type}`);
+      if (extracted.primaryContactName) lines.push(`Contact: ${extracted.primaryContactName}`);
+      if (extracted.primaryContactEmail) lines.push(`Email: ${extracted.primaryContactEmail}`);
+      if (extracted.primaryContactPhone) lines.push(`Phone: ${extracted.primaryContactPhone}`);
+      if (extracted.annualIncome) lines.push(`Annual Income: \u00A3${extracted.annualIncome.toLocaleString()}`);
+      if (extracted.registeredNumber) lines.push(`Reg Number: ${extracted.registeredNumber}`);
+      if (extracted.address) {
+        const addr = Object.values(extracted.address).filter(Boolean).join(', ');
+        if (addr) lines.push(`Address: ${addr}`);
+      }
+      if (extracted.policiesHeld?.length) lines.push(`Policies: ${extracted.policiesHeld.join(', ')}`);
+      lines.push('\nWould you like me to create a client record with this information?');
+
+      await sendMessage(lines.join('\n'));
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Failed to process document';
+      setError(`Document upload failed: ${errMsg}`);
+    } finally {
+      setIsUploading(false);
+      setUploadedFileName(null);
+      if (fileUploadRef.current) fileUploadRef.current.value = '';
+    }
+  }, [sendMessage]);
 
   // -----------------------------------------------------------------------
   // Keyboard handling
@@ -999,6 +1076,24 @@ export default function AgentWorkspacePage() {
                 }}
               />
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                {/* Document upload button */}
+                <button
+                  onClick={() => fileUploadRef.current?.click()}
+                  disabled={isStreaming || isUploading}
+                  className="p-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-150"
+                  title="Upload document"
+                >
+                  {isUploading ? (
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+                    </svg>
+                  )}
+                </button>
                 {/* Voice input button */}
                 {speechSupported && (
                   <button
@@ -1043,8 +1138,25 @@ export default function AgentWorkspacePage() {
             </div>
           </div>
           <p className="text-[10px] text-slate-600 mt-2 text-center">
-            Enter to send \u00b7 Shift+Enter for new line{speechSupported ? ' \u00b7 \uD83C\uDF99\uFE0F Voice input available' : ''}
+            Enter to send \u00b7 Shift+Enter for new line{speechSupported ? ' \u00b7 \uD83C\uDF99\uFE0F Voice' : ''} \u00b7 \uD83D\uDCCE Upload docs
           </p>
+          {/* Upload status */}
+          {isUploading && uploadedFileName && (
+            <p className="text-[10px] text-teal-400 mt-1 text-center animate-pulse">
+              Processing {uploadedFileName}...
+            </p>
+          )}
+          {/* Hidden file input */}
+          <input
+            ref={fileUploadRef}
+            type="file"
+            className="hidden"
+            accept=".pdf,.doc,.docx,.txt,.csv,.rtf,.png,.jpg,.jpeg"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleAgentFileUpload(file);
+            }}
+          />
         </div>
         </>
         )}
