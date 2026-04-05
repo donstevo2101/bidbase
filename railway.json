@@ -2,10 +2,10 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "cd server && npm install && npm run build"
+    "buildCommand": "cd server && npm install"
   },
   "deploy": {
-    "startCommand": "cd server && npm start",
+    "startCommand": "cd server && node -r ./preload.js -e \"require('tsx/cjs');require('./src/index.ts')\"",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
