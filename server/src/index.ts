@@ -22,12 +22,21 @@ const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
 const CLIENT_URL = process.env['CLIENT_URL'] ?? 'http://localhost:5173';
 
 // Global middleware — allow multiple origins for production
-const allowedOrigins = [CLIENT_URL, 'http://localhost:5173', 'http://localhost:4173'].filter(Boolean);
+const allowedOrigins = [
+  CLIENT_URL,
+  'http://localhost:5173',
+  'http://localhost:4173',
+  'https://bidbase-rho.vercel.app',
+].filter(Boolean);
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.some((o) => origin.startsWith(o))) {
+    // Allow requests with no origin (server-to-server, curl, etc)
+    if (!origin) { callback(null, true); return; }
+    // Allow any matching origin
+    if (allowedOrigins.some((o) => origin === o || origin.startsWith(o))) {
       callback(null, true);
     } else {
+      console.warn(`[CORS] Blocked origin: ${origin}. Allowed: ${allowedOrigins.join(', ')}`);
       callback(null, false);
     }
   },
