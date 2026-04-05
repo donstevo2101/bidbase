@@ -21,8 +21,18 @@ const app = express();
 const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
 const CLIENT_URL = process.env['CLIENT_URL'] ?? 'http://localhost:5173';
 
-// Global middleware
-app.use(cors({ origin: CLIENT_URL, credentials: true }));
+// Global middleware — allow multiple origins for production
+const allowedOrigins = [CLIENT_URL, 'http://localhost:5173', 'http://localhost:4173'].filter(Boolean);
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.some((o) => origin.startsWith(o))) {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
+  credentials: true,
+}));
 
 // Stripe webhook needs raw body — mount BEFORE json middleware
 app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRouter);

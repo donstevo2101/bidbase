@@ -1,6 +1,8 @@
 import type { ApiResponse, ApiPaginatedResponse } from '@shared/types/api';
 
-const API_BASE = '/api';
+// In production, VITE_API_URL points to the Railway backend (e.g. https://bidbase-api.up.railway.app/api)
+// In development, Vite proxy handles /api → localhost:3001
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 async function getAccessToken(): Promise<string | null> {
   // Read from Zustand store — avoids localStorage for tokens
