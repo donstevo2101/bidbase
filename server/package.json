@@ -3,9 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "dev": "tsx watch --import ./src/env.ts src/index.ts",
-    "build": "echo 'Using tsx for production'",
-    "start": "tsx --import ./src/env.ts src/index.ts"
+    "dev": "node -r ./preload.js -e \"require('tsx/cjs');require('./src/index.ts')\"",
+    "build": "echo 'Using tsx runtime'",
+    "start": "node -r ./preload.js -e \"require('tsx/cjs');require('./src/index.ts')\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
