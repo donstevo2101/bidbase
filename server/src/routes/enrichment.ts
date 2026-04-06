@@ -190,15 +190,17 @@ enrichmentRouter.post(
         scraped_at: opp.scrapedAt,
       }));
 
-      const { error, count } = await supabase
+      // Clear old scraped data and insert fresh
+      await supabase.from('grant_opportunities').delete().gt('created_at', '2000-01-01');
+
+      const { error } = await supabase
         .from('grant_opportunities')
-        .upsert(rows, { onConflict: 'title,funder', ignoreDuplicates: true })
-        .select('id');
+        .insert(rows);
 
       if (error) {
         console.error('[GrantScraper] Failed to store opportunities:', error.message);
       } else {
-        stored = count ?? rows.length;
+        stored = rows.length;
       }
     }
 

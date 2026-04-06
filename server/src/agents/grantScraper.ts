@@ -226,60 +226,50 @@ async function scrapeGrantNav(now: string): Promise<GrantOpportunity[]> {
 
 async function parseGrantNavPage(html: string, now: string): Promise<GrantOpportunity[]> {
   const opportunities: GrantOpportunity[] = [];
-  const text = await extractText(html);
 
-  // GrantNav search results typically list grants with funder, amount, date
-  const lines = text.split('\n').filter((l) => l.trim());
+  // GrantNav uses specific HTML structure — parse grant result blocks directly from HTML
+  // Each grant result has a title, funder, amount, and date
+  const grantBlocks = html.match(/<div class="grant-result[^"]*"[\s\S]*?<\/div>\s*<\/div>/gi) ?? [];
 
-  let currentGrant: Partial<GrantOpportunity> = {};
+  if (grantBlocks.length > 0) {
+    for (const block of grantBlocks.slice(0, 15)) {
+      const titleMatch = block.match(/<h3[^>]*>([^<]+)<\/h3>/i) ?? block.match(/<a[^>]*>([^<]{10,})<\/a>/i);
+      const amountMatch = block.match(/[£][\d,]+(?:\.?\d{0,2})?/);
+      const funderMatch = block.match(/(?:funder|funded by|from)[:\s]*([^<\n]{5,80})/i);
+      const dateMatch = block.match(/\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4}/i);
+      const urlMatch = block.match(/href="([^"]*grant[^"]*)"/i);
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    // Look for grant titles (typically start with a capital and are substantial)
-    if (trimmed.length > 20 && trimmed.length < 200 && /^[A-Z]/.test(trimmed)) {
-      // If we have a previous grant, save it
-      if (currentGrant.title) {
+      if (titleMatch) {
         opportunities.push({
-          title: currentGrant.title,
-          funder: currentGrant.funder ?? 'Unknown',
-          url: 'https://grantnav.threesixtygiving.org',
-          amount: currentGrant.amount,
-          description: currentGrant.description,
+          title: titleMatch[1].trim(),
+          funder: funderMatch ? funderMatch[1].trim() : 'Unknown',
+          url: urlMatch ? `https://grantnav.threesixtygiving.org${urlMatch[1]}` : 'https://grantnav.threesixtygiving.org',
+          amount: amountMatch ? amountMatch[0] : undefined,
+          deadline: dateMatch ? dateMatch[0] : undefined,
           source: '360giving_grantnav',
           scrapedAt: now,
         });
       }
-
-      currentGrant = { title: trimmed };
     }
-
-    // Look for amounts on subsequent lines
-    const amountMatch = trimmed.match(/[£][\d,]+/);
-    if (amountMatch && currentGrant.title && !currentGrant.amount) {
-      currentGrant.amount = amountMatch[0];
-    }
-
-    // Look for funder names (lines containing "Funded by" or similar)
-    const funderMatch = trimmed.match(/(?:funded by|funder|from)\s*[:\s]*(.+)/i);
-    if (funderMatch && currentGrant.title && !currentGrant.funder) {
-      currentGrant.funder = funderMatch[1].trim();
-    }
-
-    if (opportunities.length >= 15) break;
   }
 
-  // Don't forget the last one
-  if (currentGrant.title && opportunities.length < 15) {
-    opportunities.push({
-      title: currentGrant.title,
-      funder: currentGrant.funder ?? 'Unknown',
-      url: 'https://grantnav.threesixtygiving.org',
-      amount: currentGrant.amount,
-      description: currentGrant.description,
-      source: '360giving_grantnav',
-      scrapedAt: now,
-    });
+  // Fallback: if no structured blocks found, try the JSON-LD or search result links
+  if (opportunities.length === 0) {
+    const linkMatches = html.matchAll(/<a[^>]*href="(\/grant\/[^"]+)"[^>]*>([^<]{10,100})<\/a>/gi);
+    for (const match of linkMatches) {
+      if (opportunities.length >= 15) break;
+      const url = match[1] ?? '';
+      const title = match[2] ?? '';
+      if (title && !title.match(/^(Search|Filter|Sort|Page|Next|Prev|Home|About)/i)) {
+        opportunities.push({
+          title: title.trim(),
+          funder: 'Unknown',
+          url: `https://grantnav.threesixtygiving.org${url}`,
+          source: '360giving_grantnav',
+          scrapedAt: now,
+        });
+      }
+    }
   }
 
   return opportunities;
@@ -376,9 +366,16 @@ function extractEligibility(text: string): string | undefined {
   return eligMatch ? eligMatch[1].trim() : undefined;
 }
 
+const JUNK_PATTERNS = /^(menu|home|skip|cookie|privacy|footer|search|filter|sort|page|next|prev|about|contact|sign|log|back|close|share|comment|subscribe|newsletter|loading|read more|learn more|view all|see all|show more|our guide|data quality|titles & descriptions|grant programme titles)/i;
+
 function deduplicateOpportunities(opportunities: GrantOpportunity[]): GrantOpportunity[] {
   const seen = new Set<string>();
   return opportunities.filter((opp) => {
+    // Filter out navigation junk
+    if (JUNK_PATTERNS.test(opp.title)) return false;
+    if (opp.title.length < 15) return false;
+    if (opp.funder === 'Unknown' && !opp.amount && !opp.deadline && (!opp.description || opp.description.length < 50)) return false;
+
     const key = opp.title.toLowerCase().replace(/\s+/g, ' ').trim();
     if (seen.has(key)) return false;
     seen.add(key);
