@@ -6,6 +6,7 @@ import { validate } from '../middleware/validate.js';
 import { anthropic, AGENT_MODEL, AGENT_MAX_TOKENS } from '../lib/anthropic.js';
 import { supabase } from '../lib/supabase.js';
 import { buildContext } from '../agents/contextBuilder.js';
+import { searchCompaniesHouse as chSearch, getCompanyProfile as chProfile, getCompanyOfficers as chOfficers, getCompanyFilingHistory as chFilings } from '../agents/companiesHouse.js';
 import { getHeadCoachPrompt } from '../agents/prompts/headCoach.js';
 import { getVAPrompt } from '../agents/prompts/vaAgent.js';
 import { getEligibilityPrompt } from '../agents/prompts/eligibilityAgent.js';
@@ -143,6 +144,80 @@ agentsRouter.post(
 
     // Build context pack from database
     const context = await buildContext(orgId, clientId, applicationId);
+
+    // If VA agent and no client selected, try to find Companies House data from the message
+    if (agentType === 'va' && !clientId && !context.companiesHouse && messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg && lastMsg.content) {
+        try {
+          // Look for company number pattern (8 digits)
+          const numMatch = lastMsg.content.match(/\b(\d{7,8})\b/);
+
+          let companyNumber: string | null = null;
+          const commonWords = new Set(['tell','me','about','the','a','an','for','of','and','is','are','was','who','what','where','how','look','up','find','search','get','show','give','can','you','do','i','my','this','that','please','thanks','company','details','directors','information','info']);
+
+          if (numMatch) {
+            companyNumber = numMatch[1]!;
+          } else {
+            // Smart extraction: find words before CIC/Ltd/Limited/charity
+            const words = lastMsg.content.split(/\s+/);
+            const typeIdx = words.findIndex(w => /^(CIC|Ltd|Limited|LLP|PLC|charity)$/i.test(w));
+            let searchName = '';
+
+            if (typeIdx > 0) {
+              const nameWords: string[] = [];
+              for (let i = typeIdx - 1; i >= Math.max(0, typeIdx - 4); i--) {
+                if (commonWords.has(words[i]!.toLowerCase().replace(/[^a-z]/g, ''))) break;
+                nameWords.unshift(words[i]!);
+              }
+              searchName = nameWords.join(' ');
+            }
+
+            // Fallback: check for quoted names
+            if (!searchName) {
+              const quoted = lastMsg.content.match(/["']([A-Za-z0-9][A-Za-z0-9\s&'-]{2,40})["']/);
+              if (quoted?.[1]) searchName = quoted[1];
+            }
+
+            if (searchName) {
+              console.log(`[VA] Searching Companies House for: "${searchName}"`);
+              const results = await chSearch(searchName);
+              if (results.length > 0) {
+                companyNumber = results[0]!.companyNumber;
+                console.log(`[VA] Found: ${results[0]!.companyName} (${companyNumber})`);
+              }
+            }
+          }
+
+          if (companyNumber) {
+            const [profile, officers, filings] = await Promise.all([
+              chProfile(companyNumber).catch(() => null),
+              chOfficers(companyNumber).catch(() => []),
+              chFilings(companyNumber).catch(() => []),
+            ]);
+
+            if (profile) {
+              const addr = profile.registeredAddress;
+              context.companiesHouse = {
+                companyNumber: profile.companyNumber,
+                companyName: profile.companyName,
+                companyType: profile.companyType,
+                companyStatus: profile.companyStatus,
+                dateOfCreation: profile.dateOfCreation,
+                registeredAddress: [addr.line1, addr.line2, addr.locality, addr.region, addr.postalCode].filter(Boolean).join(', '),
+                sicCodes: profile.sicCodes ?? [],
+                officers: officers.map((o) => ({ name: o.name, role: o.role, appointedOn: o.appointedOn })),
+                recentFilings: filings.slice(0, 5).map((f) => ({ date: f.date, description: f.description })),
+                hasInsolvencyHistory: profile.hasInsolvencyHistory,
+              };
+            }
+          }
+        } catch {
+          // Companies House lookup failed — continue without it
+        }
+      }
+    }
+
     const systemPrompt = getSystemPrompt(agentType, context);
 
     // Set SSE headers
