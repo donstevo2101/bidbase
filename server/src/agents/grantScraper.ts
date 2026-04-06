@@ -18,6 +18,158 @@ export interface GrantOpportunity {
   description?: string;
   source: string;
   scrapedAt: string;
+  openDate?: string;
+  closeDate?: string;
+  status?: 'open' | 'upcoming' | 'closed';
+  previousAwards?: number;
+  totalApplicants?: number;
+  averageAward?: string;
+  sectors?: string[];
+  riskScore?: number;
+}
+
+// ---- Date extraction helpers ----
+
+interface ExtractedDates {
+  openDate?: string;
+  closeDate?: string;
+  status?: 'open' | 'upcoming' | 'closed';
+}
+
+/**
+ * Extracts opening/closing dates from page text using common UK grant patterns.
+ */
+function extractDatesFromText(text: string): ExtractedDates {
+  const result: ExtractedDates = {};
+
+  // Pattern: "Rolling programme" / "rolling basis" → open, no close date
+  if (/rolling\s+(?:programme|basis|funding|applications?)/i.test(text)) {
+    result.status = 'open';
+    return result;
+  }
+
+  // Pattern: "Opens: DD Month YYYY" / "Opening date: DD Month YYYY"
+  const opensMatch = text.match(
+    /(?:opens?|opening\s+date|applications?\s+open)[:\s]*(\d{1,2}[\s/.-]\w+[\s/.-]\d{4})/i
+  );
+  if (opensMatch) {
+    result.openDate = normaliseDate(opensMatch[1]);
+  }
+
+  // Pattern: "Closes: DD Month YYYY" / "Closing date: DD Month YYYY" / "Deadline: DD Month YYYY"
+  const closesMatch = text.match(
+    /(?:closes?|closing\s+date|deadline|applications?\s+close|submit\s+by|due\s+(?:date|by))[:\s]*(\d{1,2}[\s/.-]\w+[\s/.-]\d{4})/i
+  );
+  if (closesMatch) {
+    result.closeDate = normaliseDate(closesMatch[1]);
+  }
+
+  // Pattern: "Application window: DD/MM/YYYY - DD/MM/YYYY"
+  const windowMatch = text.match(
+    /(?:application\s+window|funding\s+window|open\s+period)[:\s]*(\d{1,2}[/.-]\d{1,2}[/.-]\d{4})\s*[-–to]+\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{4})/i
+  );
+  if (windowMatch) {
+    result.openDate = normaliseDate(windowMatch[1]);
+    result.closeDate = normaliseDate(windowMatch[2]);
+  }
+
+  // Pattern: "DD Month YYYY - DD Month YYYY" (date range without label)
+  if (!result.openDate && !result.closeDate) {
+    const rangeMatch = text.match(
+      /(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\s*[-–to]+\s*(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})/i
+    );
+    if (rangeMatch) {
+      result.openDate = normaliseDate(rangeMatch[1]);
+      result.closeDate = normaliseDate(rangeMatch[2]);
+    }
+  }
+
+  // Determine status based on dates
+  if (result.openDate || result.closeDate) {
+    const now = new Date();
+    if (result.openDate) {
+      const open = new Date(result.openDate);
+      if (open > now) {
+        result.status = 'upcoming';
+        return result;
+      }
+    }
+    if (result.closeDate) {
+      const close = new Date(result.closeDate);
+      if (close < now) {
+        result.status = 'closed';
+      } else {
+        result.status = 'open';
+      }
+    } else {
+      result.status = 'open';
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Normalises a date string into ISO format (YYYY-MM-DD).
+ */
+function normaliseDate(raw: string): string {
+  const trimmed = raw.trim();
+
+  // Try DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+  const numericMatch = trimmed.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+  if (numericMatch) {
+    const day = numericMatch[1].padStart(2, '0');
+    const month = numericMatch[2].padStart(2, '0');
+    const year = numericMatch[3];
+    return `${year}-${month}-${day}`;
+  }
+
+  // Try DD Month YYYY
+  const parsed = Date.parse(trimmed);
+  if (!isNaN(parsed)) {
+    return new Date(parsed).toISOString().split('T')[0];
+  }
+
+  return trimmed;
+}
+
+/**
+ * Extracts sector/focus area keywords from grant text.
+ */
+function extractSectors(text: string): string[] {
+  const sectorKeywords = [
+    'health', 'education', 'youth', 'arts', 'culture', 'environment', 'climate',
+    'housing', 'homelessness', 'mental health', 'disability', 'sport', 'community',
+    'employment', 'skills', 'training', 'digital', 'rural', 'urban', 'poverty',
+    'food', 'wellbeing', 'children', 'elderly', 'veterans', 'refugees',
+    'social enterprise', 'social care', 'criminal justice', 'heritage',
+  ];
+  const lower = text.toLowerCase();
+  return sectorKeywords.filter((kw) => lower.includes(kw));
+}
+
+/**
+ * Extracts award/applicant statistics from grant text.
+ */
+function extractStats(text: string): { previousAwards?: number; totalApplicants?: number; averageAward?: string } {
+  const result: { previousAwards?: number; totalApplicants?: number; averageAward?: string } = {};
+
+  const awardsMatch = text.match(/(\d[\d,]*)\s*(?:awards?|grants?)\s*(?:made|given|awarded|distributed)/i);
+  if (awardsMatch) {
+    result.previousAwards = parseInt(awardsMatch[1].replace(/,/g, ''), 10);
+  }
+
+  const applicantsMatch = text.match(/(\d[\d,]*)\s*(?:applicants?|applications?\s+received)/i);
+  if (applicantsMatch) {
+    result.totalApplicants = parseInt(applicantsMatch[1].replace(/,/g, ''), 10);
+  }
+
+  const avgMatch = text.match(/(?:average|typical)\s+(?:award|grant)\s*(?:of|:)?\s*[£]?([\d,]+)/i);
+  if (avgMatch) {
+    result.averageAward = `£${avgMatch[1]}`;
+  }
+
+  return result;
 }
 
 // ---- Exported functions ----
@@ -87,6 +239,9 @@ export async function searchGrantsForClient(
     const searchQuery = `"grant funding" "now open" UK ${typeQuery} ${geography}${sectorQuery} 2026`;
     const results = await searchWeb(searchQuery);
     for (const result of results.slice(0, 8)) {
+      const snippetDates = extractDatesFromText(result.snippet ?? '');
+      const snippetSectors = extractSectors(result.snippet ?? '');
+
       opportunities.push({
         title: result.title,
         funder: extractFunderFromTitle(result.title),
@@ -94,6 +249,10 @@ export async function searchGrantsForClient(
         description: result.snippet,
         source: 'duckduckgo_search',
         scrapedAt: now,
+        openDate: snippetDates.openDate,
+        closeDate: snippetDates.closeDate,
+        status: snippetDates.status ?? 'open',
+        sectors: snippetSectors.length > 0 ? snippetSectors : undefined,
       });
     }
   } catch (err) {
@@ -143,16 +302,26 @@ async function scrapeNationalLottery(now: string): Promise<GrantOpportunity[]> {
 
       const amountMatch = section.match(/[£][\d,]+(?:\s*(?:to|[-–])\s*[£]?[\d,]+)?/);
       const deadlineMatch = section.match(/(?:deadline|closes?|closing date)[:\s]*([^\n.]+)/i);
+      const dates = extractDatesFromText(section);
+      const stats = extractStats(section);
+      const sectors = extractSectors(section);
 
       opportunities.push({
         title,
         funder: 'The National Lottery Community Fund',
         url: 'https://www.tnlcommunityfund.org.uk/funding/programmes',
         amount: amountMatch ? amountMatch[0] : undefined,
-        deadline: deadlineMatch ? deadlineMatch[1].trim() : undefined,
+        deadline: deadlineMatch ? deadlineMatch[1].trim() : dates.closeDate,
         description: section.slice(0, 300).trim(),
         source: 'tnl_community_fund',
         scrapedAt: now,
+        openDate: dates.openDate,
+        closeDate: dates.closeDate ?? (deadlineMatch ? deadlineMatch[1].trim() : undefined),
+        status: dates.status ?? 'open',
+        previousAwards: stats.previousAwards,
+        totalApplicants: stats.totalApplicants,
+        averageAward: stats.averageAward,
+        sectors: sectors.length > 0 ? sectors : undefined,
       });
 
       if (opportunities.length >= 15) break;
@@ -193,6 +362,9 @@ async function parseGovUkPage(html: string, now: string): Promise<GrantOpportuni
     if (title.match(/^(Menu|Home|Skip|Cookie|Privacy|Footer|Search|Filter)/i)) continue;
 
     const amountMatch = section.match(/[£][\d,]+(?:\s*(?:to|[-–])\s*[£]?[\d,]+)?/);
+    const dates = extractDatesFromText(section);
+    const stats = extractStats(section);
+    const sectors = extractSectors(section);
 
     opportunities.push({
       title,
@@ -202,6 +374,13 @@ async function parseGovUkPage(html: string, now: string): Promise<GrantOpportuni
       description: section.slice(0, 300).trim(),
       source: 'gov_uk',
       scrapedAt: now,
+      openDate: dates.openDate,
+      closeDate: dates.closeDate,
+      status: dates.status ?? 'open',
+      previousAwards: stats.previousAwards,
+      totalApplicants: stats.totalApplicants,
+      averageAward: stats.averageAward,
+      sectors: sectors.length > 0 ? sectors : undefined,
     });
 
     if (opportunities.length >= 15) break;
@@ -242,14 +421,26 @@ async function parseGrantNavPage(html: string, now: string): Promise<GrantOpport
       const urlMatch = block.match(/href="([^"]*grant[^"]*)"/i);
 
       if (titleMatch) {
+        const blockText = block.replace(/<[^>]+>/g, ' ');
+        const dates = extractDatesFromText(blockText);
+        const stats = extractStats(blockText);
+        const sectors = extractSectors(blockText);
+
         opportunities.push({
           title: titleMatch[1].trim(),
           funder: funderMatch ? funderMatch[1].trim() : 'Unknown',
           url: urlMatch ? `https://grantnav.threesixtygiving.org${urlMatch[1]}` : 'https://grantnav.threesixtygiving.org',
           amount: amountMatch ? amountMatch[0] : undefined,
-          deadline: dateMatch ? dateMatch[0] : undefined,
+          deadline: dateMatch ? dateMatch[0] : dates.closeDate,
           source: '360giving_grantnav',
           scrapedAt: now,
+          openDate: dates.openDate,
+          closeDate: dates.closeDate ?? (dateMatch ? dateMatch[0] : undefined),
+          status: dates.status ?? 'open',
+          previousAwards: stats.previousAwards,
+          totalApplicants: stats.totalApplicants,
+          averageAward: stats.averageAward,
+          sectors: sectors.length > 0 ? sectors : undefined,
         });
       }
     }
@@ -302,16 +493,27 @@ async function scrapeCharityExcellence(now: string): Promise<GrantOpportunity[]>
       const title = titleMatch[1].trim();
       if (title.match(/^(Menu|Home|Cookie|Privacy|Footer|Share|Comment)/i)) continue;
 
+      const dates = extractDatesFromText(section);
+      const stats = extractStats(section);
+      const sectors = extractSectors(section);
+
       opportunities.push({
         title,
         funder: extractFunderFromTitle(title),
         url: 'https://www.charityexcellence.co.uk/Home/BlogDetail?PostId=139',
         amount: amountMatch ? amountMatch[0] : undefined,
-        deadline: deadlineMatch ? deadlineMatch[1].trim() : undefined,
+        deadline: deadlineMatch ? deadlineMatch[1].trim() : dates.closeDate,
         description: section.slice(0, 300).trim(),
         eligibility: extractEligibility(section),
         source: 'charity_excellence',
         scrapedAt: now,
+        openDate: dates.openDate,
+        closeDate: dates.closeDate ?? (deadlineMatch ? deadlineMatch[1].trim() : undefined),
+        status: dates.status ?? 'open',
+        previousAwards: stats.previousAwards,
+        totalApplicants: stats.totalApplicants,
+        averageAward: stats.averageAward,
+        sectors: sectors.length > 0 ? sectors : undefined,
       });
 
       if (opportunities.length >= 15) break;
@@ -334,6 +536,9 @@ async function scrapeWebSearchGrants(now: string): Promise<GrantOpportunity[]> {
       : await searchWeb(query);
 
     for (const result of results.slice(0, 15)) {
+      const snippetDates = extractDatesFromText(result.snippet ?? '');
+      const snippetSectors = extractSectors(result.snippet ?? '');
+
       opportunities.push({
         title: result.title,
         funder: extractFunderFromTitle(result.title),
@@ -341,6 +546,10 @@ async function scrapeWebSearchGrants(now: string): Promise<GrantOpportunity[]> {
         description: result.snippet,
         source: isApifyAvailable() ? 'google_search' : 'duckduckgo_search',
         scrapedAt: now,
+        openDate: snippetDates.openDate,
+        closeDate: snippetDates.closeDate,
+        status: snippetDates.status ?? 'open',
+        sectors: snippetSectors.length > 0 ? snippetSectors : undefined,
       });
     }
   } catch (err) {

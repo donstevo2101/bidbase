@@ -9,6 +9,8 @@ import { supabase } from '../lib/supabase.js';
 import { enrichClientData } from '../agents/dataEnrichment.js';
 import { searchCompaniesHouse, getCompanyProfile } from '../agents/companiesHouse.js';
 import { searchGrantsForClient, scrapeGrantPortals } from '../agents/grantScraper.js';
+import { scoreGrantRisk } from '../agents/grantRiskScorer.js';
+import type { GrantOpportunity } from '../agents/grantScraper.js';
 import type { Request, Response, NextFunction } from 'express';
 
 export const enrichmentRouter = Router();
@@ -147,10 +149,11 @@ enrichmentRouter.get(
 enrichmentRouter.post(
   '/grants/search',
   asyncHandler(async (req, res) => {
-    const { clientType, geography, sector } = req.body as {
+    const { clientType, geography, sector, clientId } = req.body as {
       clientType?: string;
       geography?: string;
       sector?: string;
+      clientId?: string;
     };
 
     if (!clientType || !geography) {
@@ -162,6 +165,40 @@ enrichmentRouter.post(
     }
 
     const opportunities = await searchGrantsForClient(clientType, geography, sector);
+
+    // If clientId provided, score risk for each opportunity
+    if (clientId) {
+      const { data: client } = await supabase
+        .from('clients')
+        .select('*')
+        .eq('id', clientId)
+        .eq('organisation_id', req.user.org_id)
+        .single();
+
+      if (client) {
+        const scored = await Promise.allSettled(
+          opportunities.map(async (opp) => {
+            const result = await scoreGrantRisk(
+              opp,
+              client.type ?? clientType,
+              client.policies_held ?? undefined,
+              geography,
+              client.annual_income ?? undefined
+            );
+            opp.riskScore = result.score;
+            return opp;
+          })
+        );
+
+        // Replace opportunities with scored versions where available
+        for (let i = 0; i < scored.length; i++) {
+          if (scored[i].status === 'fulfilled') {
+            opportunities[i] = (scored[i] as PromiseFulfilledResult<GrantOpportunity>).value;
+          }
+        }
+      }
+    }
+
     res.json({ success: true, data: opportunities });
   })
 );
@@ -173,6 +210,7 @@ enrichmentRouter.post(
 enrichmentRouter.post(
   '/grants/scrape',
   asyncHandler(async (req, res) => {
+    const { clientId } = req.body as { clientId?: string };
     const opportunities = await scrapeGrantPortals();
 
     // Store results in Supabase
@@ -188,6 +226,13 @@ enrichmentRouter.post(
         description: opp.description ?? null,
         source: opp.source,
         scraped_at: opp.scrapedAt,
+        open_date: opp.openDate ?? null,
+        close_date: opp.closeDate ?? null,
+        status: opp.status ?? 'open',
+        previous_awards: opp.previousAwards ?? null,
+        total_applicants: opp.totalApplicants ?? null,
+        average_award: opp.averageAward ?? null,
+        sectors: opp.sectors ?? null,
       }));
 
       // Clear old scraped data and insert fresh
@@ -201,6 +246,38 @@ enrichmentRouter.post(
         console.error('[GrantScraper] Failed to store opportunities:', error.message);
       } else {
         stored = rows.length;
+      }
+    }
+
+    // If clientId provided, score risk for each opportunity
+    if (clientId) {
+      const { data: client } = await supabase
+        .from('clients')
+        .select('*')
+        .eq('id', clientId)
+        .eq('organisation_id', req.user.org_id)
+        .single();
+
+      if (client) {
+        const scored = await Promise.allSettled(
+          opportunities.map(async (opp) => {
+            const result = await scoreGrantRisk(
+              opp,
+              client.type ?? 'charity',
+              client.policies_held ?? undefined,
+              undefined,
+              client.annual_income ?? undefined
+            );
+            opp.riskScore = result.score;
+            return opp;
+          })
+        );
+
+        for (let i = 0; i < scored.length; i++) {
+          if (scored[i].status === 'fulfilled') {
+            opportunities[i] = (scored[i] as PromiseFulfilledResult<GrantOpportunity>).value;
+          }
+        }
       }
     }
 
@@ -221,5 +298,58 @@ enrichmentRouter.post(
         opportunities,
       },
     });
+  })
+);
+
+/**
+ * POST /grants/score
+ * Scores the risk/likelihood of a client succeeding with a specific grant.
+ */
+enrichmentRouter.post(
+  '/grants/score',
+  asyncHandler(async (req, res) => {
+    const { grant, clientId } = req.body as {
+      grant?: GrantOpportunity;
+      clientId?: string;
+    };
+
+    if (!grant || !clientId) {
+      res.status(422).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'grant and clientId are required' },
+      });
+      return;
+    }
+
+    const { data: client, error: clientError } = await supabase
+      .from('clients')
+      .select('*')
+      .eq('id', clientId)
+      .eq('organisation_id', req.user.org_id)
+      .single();
+
+    if (clientError || !client) {
+      res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Client not found' },
+      });
+      return;
+    }
+
+    // Extract geography from client address if available
+    const address = client.address as Record<string, unknown> | null;
+    const geography = address
+      ? [address['region'], address['city'], address['county']].filter(Boolean).join(', ')
+      : undefined;
+
+    const result = await scoreGrantRisk(
+      grant,
+      client.type ?? 'charity',
+      client.policies_held ?? undefined,
+      geography || undefined,
+      client.annual_income ?? undefined
+    );
+
+    res.json({ success: true, data: result });
   })
 );
