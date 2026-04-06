@@ -10,6 +10,7 @@ import { enrichClientData } from '../agents/dataEnrichment.js';
 import { searchCompaniesHouse, getCompanyProfile } from '../agents/companiesHouse.js';
 import { searchGrantsForClient, scrapeGrantPortals } from '../agents/grantScraper.js';
 import { scoreGrantRisk } from '../agents/grantRiskScorer.js';
+import { fetch360GivingFunders } from '../agents/threeSixtyGiving.js';
 import type { GrantOpportunity } from '../agents/grantScraper.js';
 import type { Request, Response, NextFunction } from 'express';
 
@@ -398,6 +399,78 @@ async function syncFundersFromGrants(): Promise<number> {
   console.log(`[FunderSync] Synced ${funderMap.size} funders, ${created} new`);
   return created;
 }
+
+/**
+ * POST /funders/sync-360giving
+ * Fetches funder data from 360Giving GrantNav and upserts into the funders table
+ * as platform-wide funders (organisation_id = null).
+ */
+enrichmentRouter.post(
+  '/funders/sync-360giving',
+  asyncHandler(async (req, res) => {
+    console.log('[360Giving] Starting sync...');
+    const records = await fetch360GivingFunders();
+
+    let created = 0;
+    let updated = 0;
+
+    for (const record of records) {
+      // Store 360Giving stats in the notes field as JSON
+      const statsJson = JSON.stringify({
+        source: '360giving',
+        totalGrants: record.totalGrants,
+        grantsToOrgs: record.grantsToOrgs,
+        grantsToIndividuals: record.grantsToIndividuals,
+        totalToOrgs: record.totalToOrgs,
+        totalToIndividuals: record.totalToIndividuals,
+        latestAward: record.latestAward,
+        earliestAward: record.earliestAward,
+        grantNavUrl: record.grantNavUrl,
+        syncedAt: new Date().toISOString(),
+      });
+
+      // Check if funder already exists (platform-wide)
+      const { data: existing } = await supabase
+        .from('funders')
+        .select('id')
+        .is('organisation_id', null)
+        .ilike('name', record.name)
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        await supabase.from('funders').update({
+          notes: statsJson,
+          last_updated: new Date().toISOString(),
+        }).eq('id', existing[0]!.id);
+        updated++;
+      } else {
+        await supabase.from('funders').insert({
+          organisation_id: null,
+          name: record.name,
+          notes: statsJson,
+          verified: false,
+        });
+        created++;
+      }
+    }
+
+    // Log the sync
+    await supabase.from('activity_log').insert({
+      organisation_id: req.user.org_id,
+      actor_id: req.user.id,
+      actor_type: 'user',
+      action: 'funders_360giving_synced',
+      details: { totalFetched: records.length, created, updated },
+    });
+
+    console.log(`[360Giving] Sync complete: ${created} created, ${updated} updated`);
+
+    res.json({
+      success: true,
+      data: { totalFetched: records.length, created, updated },
+    });
+  })
+);
 
 /**
  * POST /grants/scrape
