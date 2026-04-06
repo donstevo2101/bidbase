@@ -1,7 +1,8 @@
 import React, { useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, API_BASE } from '../../lib/api';
+import { useSessionStore } from '../../stores/session';
 import { toast } from 'sonner';
 
 // ---- Types ----
@@ -153,10 +154,17 @@ export default function GrantDatabasePage() {
     return params.toString();
   }, [filters]);
 
+  const accessToken = useSessionStore((s) => s.accessToken);
+
   const { data: dbResult, isLoading, isFetching } = useQuery({
     queryKey: ['grant-database', filters],
     queryFn: async () => {
-      const res = await fetch(`/api/enrichment/grants/database?${buildQueryParams()}`);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+
+      const res = await fetch(`${API_BASE}/enrichment/grants/database?${buildQueryParams()}`, { headers });
+      if (!res.ok) return { grants: [], stats: { total: 0, open: 0, closingThisWeek: 0, closed: 0, lastScrapedAt: null }, sources: [], pagination: { page: 1, limit: 50, total: 0 } } as GrantDatabaseData;
+
       const json = await res.json() as { success: boolean; data: GrantRecord[]; stats: GrantDatabaseData['stats']; sources: string[]; pagination: GrantDatabaseData['pagination'] };
       if (json.success) {
         return { grants: json.data ?? [], stats: json.stats, sources: json.sources ?? [], pagination: json.pagination } as GrantDatabaseData;
