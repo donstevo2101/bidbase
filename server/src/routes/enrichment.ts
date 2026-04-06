@@ -204,8 +204,90 @@ enrichmentRouter.post(
 );
 
 /**
+ * Upserts scraped grants into the database.
+ * Returns counts of new and updated grants.
+ */
+async function upsertScrapedGrants(opportunities: GrantOpportunity[]): Promise<{ newGrants: number; updatedGrants: number }> {
+  let newGrants = 0;
+  let updatedGrants = 0;
+
+  for (const opp of opportunities) {
+    const row = {
+      title: opp.title,
+      funder: opp.funder,
+      url: opp.url,
+      amount: opp.amount ?? null,
+      deadline: opp.deadline ?? null,
+      eligibility: opp.eligibility ?? null,
+      description: opp.description ?? null,
+      source: opp.source,
+      scraped_at: opp.scrapedAt,
+      open_date: opp.openDate ?? null,
+      close_date: opp.closeDate ?? null,
+      status: opp.status ?? 'open',
+      previous_awards: opp.previousAwards ?? null,
+      total_applicants: opp.totalApplicants ?? null,
+      average_award: opp.averageAward ?? null,
+      sectors: opp.sectors ?? null,
+    };
+
+    // Check if grant already exists (match on title + funder, case-insensitive)
+    const { data: existing } = await supabase
+      .from('grant_opportunities')
+      .select('id, deadline, status, amount, description')
+      .ilike('title', opp.title)
+      .ilike('funder', opp.funder)
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      // Update if any tracked fields changed
+      const ex = existing[0];
+      const changes: Record<string, unknown> = {};
+
+      if (row.deadline !== ex.deadline) changes['deadline'] = row.deadline;
+      if (row.close_date !== null) changes['close_date'] = row.close_date;
+      if (row.open_date !== null) changes['open_date'] = row.open_date;
+      if (row.status !== ex.status) changes['status'] = row.status;
+      if (row.amount !== ex.amount) changes['amount'] = row.amount;
+      if (row.description && row.description !== ex.description) changes['description'] = row.description;
+      changes['scraped_at'] = row.scraped_at;
+      changes['url'] = row.url;
+
+      if (Object.keys(changes).length > 1) {
+        // More than just scraped_at changed
+        await supabase.from('grant_opportunities').update(changes).eq('id', ex.id);
+        updatedGrants++;
+      }
+    } else {
+      // Insert new grant
+      const { error } = await supabase.from('grant_opportunities').insert(row);
+      if (!error) {
+        newGrants++;
+      } else {
+        console.error('[GrantScraper] Failed to insert grant:', error.message);
+      }
+    }
+  }
+
+  return { newGrants, updatedGrants };
+}
+
+/**
+ * Marks grants with close_date in the past as status='closed'.
+ */
+async function markExpiredGrantsClosed(): Promise<void> {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  await supabase
+    .from('grant_opportunities')
+    .update({ status: 'closed' })
+    .lt('close_date', todayStr)
+    .neq('status', 'closed');
+}
+
+/**
  * POST /grants/scrape
- * Triggers a full grant portal scrape and stores results in the grant_opportunities table.
+ * Triggers a full grant portal scrape and upserts results into the grant_opportunities table.
+ * Preserves historical data — only adds new grants or updates changed fields.
  */
 enrichmentRouter.post(
   '/grants/scrape',
@@ -213,41 +295,16 @@ enrichmentRouter.post(
     const { clientId } = req.body as { clientId?: string };
     const opportunities = await scrapeGrantPortals();
 
-    // Store results in Supabase
-    let stored = 0;
-    if (opportunities.length > 0) {
-      const rows = opportunities.map((opp) => ({
-        title: opp.title,
-        funder: opp.funder,
-        url: opp.url,
-        amount: opp.amount ?? null,
-        deadline: opp.deadline ?? null,
-        eligibility: opp.eligibility ?? null,
-        description: opp.description ?? null,
-        source: opp.source,
-        scraped_at: opp.scrapedAt,
-        open_date: opp.openDate ?? null,
-        close_date: opp.closeDate ?? null,
-        status: opp.status ?? 'open',
-        previous_awards: opp.previousAwards ?? null,
-        total_applicants: opp.totalApplicants ?? null,
-        average_award: opp.averageAward ?? null,
-        sectors: opp.sectors ?? null,
-      }));
+    // Upsert results into Supabase (no delete — preserve history)
+    const { newGrants, updatedGrants } = await upsertScrapedGrants(opportunities);
 
-      // Clear old scraped data and insert fresh
-      await supabase.from('grant_opportunities').delete().gt('created_at', '2000-01-01');
+    // Mark expired grants as closed
+    await markExpiredGrantsClosed();
 
-      const { error } = await supabase
-        .from('grant_opportunities')
-        .insert(rows);
-
-      if (error) {
-        console.error('[GrantScraper] Failed to store opportunities:', error.message);
-      } else {
-        stored = rows.length;
-      }
-    }
+    // Get total count in database
+    const { count: totalInDatabase } = await supabase
+      .from('grant_opportunities')
+      .select('id', { count: 'exact', head: true });
 
     // If clientId provided, score risk for each opportunity
     if (clientId) {
@@ -287,15 +344,182 @@ enrichmentRouter.post(
       actor_id: req.user.id,
       actor_type: 'user',
       action: 'grants_scraped',
-      details: { totalFound: opportunities.length, stored },
+      details: { totalFound: opportunities.length, newGrants, updatedGrants, totalInDatabase: totalInDatabase ?? 0 },
     });
 
     res.json({
       success: true,
       data: {
         totalFound: opportunities.length,
-        stored,
+        newGrants,
+        updatedGrants,
+        totalInDatabase: totalInDatabase ?? 0,
         opportunities,
+      },
+    });
+  })
+);
+
+/**
+ * GET /grants/database
+ * Returns all grants from the database with filtering, pagination, and computed fields.
+ */
+enrichmentRouter.get(
+  '/grants/database',
+  asyncHandler(async (req, res) => {
+    const status = (req.query['status'] as string) ?? 'all';
+    const source = req.query['source'] as string | undefined;
+    const funder = req.query['funder'] as string | undefined;
+    const search = req.query['search'] as string | undefined;
+    const eligibleFor = req.query['eligibleFor'] as string | undefined;
+    const closingWithin = req.query['closingWithin'] ? parseInt(req.query['closingWithin'] as string, 10) : undefined;
+    const page = Math.max(1, parseInt((req.query['page'] as string) ?? '1', 10));
+    const limit = Math.min(200, Math.max(1, parseInt((req.query['limit'] as string) ?? '50', 10)));
+    const offset = (page - 1) * limit;
+
+    // Build query
+    let query = supabase
+      .from('grant_opportunities')
+      .select('*', { count: 'exact' });
+
+    // Status filter
+    if (status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    // Source filter
+    if (source) {
+      query = query.eq('source', source);
+    }
+
+    // Funder filter (case-insensitive partial match)
+    if (funder) {
+      query = query.ilike('funder', `%${funder}%`);
+    }
+
+    // Search filter (title or description)
+    if (search) {
+      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+    }
+
+    // Eligibility filter (check eligibility text)
+    if (eligibleFor) {
+      query = query.ilike('eligibility', `%${eligibleFor}%`);
+    }
+
+    // Closing within X days
+    if (closingWithin && closingWithin > 0) {
+      const now = new Date();
+      const futureDate = new Date(now.getTime() + closingWithin * 24 * 60 * 60 * 1000);
+      query = query
+        .gte('close_date', now.toISOString().slice(0, 10))
+        .lte('close_date', futureDate.toISOString().slice(0, 10));
+    }
+
+    // Sort: open grants first (by status), then by close_date ascending
+    query = query
+      .order('status', { ascending: true })
+      .order('close_date', { ascending: true, nullsFirst: false })
+      .range(offset, offset + limit - 1);
+
+    const { data: grants, error, count } = await query;
+
+    if (error) {
+      console.error('[GrantDatabase] Query error:', error.message);
+      res.status(500).json({
+        success: false,
+        error: { code: 'QUERY_ERROR', message: 'Failed to fetch grants from database' },
+      });
+      return;
+    }
+
+    const now = new Date();
+
+    // Compute daysRemaining and ragStatus for each grant
+    const enrichedGrants = (grants ?? []).map((g: Record<string, unknown>) => {
+      const closeDate = g['close_date'] as string | null;
+      let daysRemaining: number | null = null;
+      let ragStatus: 'red' | 'amber' | 'green' | 'grey' = 'grey';
+
+      if (closeDate && g['status'] !== 'closed') {
+        const close = new Date(closeDate as string);
+        daysRemaining = Math.ceil((close.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+        if (daysRemaining < 0) {
+          daysRemaining = 0;
+          ragStatus = 'grey';
+        } else if (daysRemaining <= 7) {
+          ragStatus = 'red';
+        } else if (daysRemaining <= 14) {
+          ragStatus = 'amber';
+        } else {
+          ragStatus = 'green';
+        }
+      }
+
+      return {
+        ...g,
+        daysRemaining,
+        ragStatus,
+      };
+    });
+
+    // Get unique sources for filter dropdown
+    const { data: sourcesData } = await supabase
+      .from('grant_opportunities')
+      .select('source')
+      .limit(500);
+
+    const uniqueSources = [...new Set((sourcesData ?? []).map((s: Record<string, unknown>) => s['source'] as string))].filter(Boolean);
+
+    // Get stats
+    const { count: totalCount } = await supabase
+      .from('grant_opportunities')
+      .select('id', { count: 'exact', head: true });
+
+    const { count: openCount } = await supabase
+      .from('grant_opportunities')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'open');
+
+    const { count: closedCount } = await supabase
+      .from('grant_opportunities')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'closed');
+
+    // Closing this week count
+    const weekFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const { count: closingThisWeekCount } = await supabase
+      .from('grant_opportunities')
+      .select('id', { count: 'exact', head: true })
+      .gte('close_date', now.toISOString().slice(0, 10))
+      .lte('close_date', weekFromNow.toISOString().slice(0, 10))
+      .neq('status', 'closed');
+
+    // Last scraped timestamp
+    const { data: lastScraped } = await supabase
+      .from('grant_opportunities')
+      .select('scraped_at')
+      .order('scraped_at', { ascending: false })
+      .limit(1);
+
+    const lastScrapedAt = lastScraped && lastScraped.length > 0 ? lastScraped[0]['scraped_at'] : null;
+
+    res.json({
+      success: true,
+      data: enrichedGrants,
+      stats: {
+        total: totalCount ?? 0,
+        open: openCount ?? 0,
+        closingThisWeek: closingThisWeekCount ?? 0,
+        closed: closedCount ?? 0,
+        lastScrapedAt,
+      },
+      sources: uniqueSources,
+      pagination: {
+        page,
+        limit,
+        total: count ?? 0,
       },
     });
   })

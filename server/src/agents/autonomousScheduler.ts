@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase.js';
 import { generateDailyReport } from '../reports/dailyReport.js';
+import { scrapeGrantPortals } from './grantScraper.js';
 
 // ---- Types ----
 
@@ -10,6 +11,7 @@ interface SchedulerState {
   nextRun: Date | null;
   tasksProcessed: number;
   intervalMs: number;
+  lastGrantScrape: Date | null;
 }
 
 export interface SchedulerStatus {
@@ -70,6 +72,9 @@ async function tick(orgId: string) {
 
     // 6. Funder Intelligence weekly briefing on Mondays
     await checkFunderIntelligenceBriefing(orgId);
+
+    // 7. Daily grant scrape
+    await checkDailyGrantScrape(orgId);
   } catch (err) {
     console.error(`[Scheduler] Tick error for org ${orgId}:`, err);
     await logAction(orgId, 'scheduler_tick_error', { error: String(err) });
@@ -295,6 +300,113 @@ async function checkSuccessFeeWindows(orgId: string) {
   console.log(`[Scheduler] ${expiringFees.length} success fee window expiry alert(s) for org ${orgId}`);
 }
 
+async function checkDailyGrantScrape(orgId: string) {
+  const state = schedulers.get(orgId);
+  if (!state) return;
+
+  // Skip if last scrape was less than 23 hours ago
+  if (state.lastGrantScrape) {
+    const hoursSinceLastScrape = (Date.now() - state.lastGrantScrape.getTime()) / (1000 * 60 * 60);
+    if (hoursSinceLastScrape < 23) return;
+  }
+
+  // Also check activity_log to avoid duplicate scrapes across restarts
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const { data: existingScrape } = await supabase
+    .from('activity_log')
+    .select('id')
+    .eq('organisation_id', orgId)
+    .eq('action', 'daily_grant_scrape')
+    .gte('created_at', `${todayStr}T00:00:00Z`)
+    .limit(1);
+
+  if (existingScrape && existingScrape.length > 0) {
+    // Already scraped today — update state so we don't keep checking
+    state.lastGrantScrape = new Date();
+    return;
+  }
+
+  try {
+    console.log(`[Scheduler] Starting daily grant scrape for org ${orgId}`);
+    const opportunities = await scrapeGrantPortals();
+
+    // Upsert grants into database (same logic as the endpoint)
+    let newGrants = 0;
+    let updatedGrants = 0;
+
+    for (const opp of opportunities) {
+      const row = {
+        title: opp.title,
+        funder: opp.funder,
+        url: opp.url,
+        amount: opp.amount ?? null,
+        deadline: opp.deadline ?? null,
+        eligibility: opp.eligibility ?? null,
+        description: opp.description ?? null,
+        source: opp.source,
+        scraped_at: opp.scrapedAt,
+        open_date: opp.openDate ?? null,
+        close_date: opp.closeDate ?? null,
+        status: opp.status ?? 'open',
+        previous_awards: opp.previousAwards ?? null,
+        total_applicants: opp.totalApplicants ?? null,
+        average_award: opp.averageAward ?? null,
+        sectors: opp.sectors ?? null,
+      };
+
+      const { data: existing } = await supabase
+        .from('grant_opportunities')
+        .select('id, deadline, status, amount, description')
+        .ilike('title', opp.title)
+        .ilike('funder', opp.funder)
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        const ex = existing[0];
+        const changes: Record<string, unknown> = {};
+
+        if (row.deadline !== ex.deadline) changes['deadline'] = row.deadline;
+        if (row.close_date !== null) changes['close_date'] = row.close_date;
+        if (row.open_date !== null) changes['open_date'] = row.open_date;
+        if (row.status !== ex.status) changes['status'] = row.status;
+        if (row.amount !== ex.amount) changes['amount'] = row.amount;
+        if (row.description && row.description !== ex.description) changes['description'] = row.description;
+        changes['scraped_at'] = row.scraped_at;
+        changes['url'] = row.url;
+
+        if (Object.keys(changes).length > 1) {
+          await supabase.from('grant_opportunities').update(changes).eq('id', ex.id);
+          updatedGrants++;
+        }
+      } else {
+        const { error } = await supabase.from('grant_opportunities').insert(row);
+        if (!error) newGrants++;
+      }
+    }
+
+    // Mark expired grants as closed
+    await supabase
+      .from('grant_opportunities')
+      .update({ status: 'closed' })
+      .lt('close_date', todayStr)
+      .neq('status', 'closed');
+
+    state.lastGrantScrape = new Date();
+
+    await logAction(orgId, 'daily_grant_scrape', {
+      totalFound: opportunities.length,
+      newGrants,
+      updatedGrants,
+      timestamp: new Date().toISOString(),
+    });
+
+    console.log(`[Scheduler] Daily grant scrape complete for org ${orgId}: ${newGrants} new, ${updatedGrants} updated`);
+  } catch (err) {
+    console.error(`[Scheduler] Daily grant scrape failed for org ${orgId}:`, err);
+    await logAction(orgId, 'daily_grant_scrape_failed', { error: String(err) });
+  }
+}
+
 // ---- Public API ----
 
 export function startAutonomousAgents(orgId: string, intervalMs: number = DEFAULT_INTERVAL_MS) {
@@ -308,6 +420,7 @@ export function startAutonomousAgents(orgId: string, intervalMs: number = DEFAUL
     nextRun: new Date(Date.now() + intervalMs),
     tasksProcessed: 0,
     intervalMs,
+    lastGrantScrape: null,
   };
 
   schedulers.set(orgId, state);

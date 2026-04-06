@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { useSessionStore } from '../../stores/session';
@@ -717,6 +718,13 @@ export default function GrantDiscoveryPage() {
             <h1 className="text-[18px] font-semibold text-slate-900">Grant Discovery</h1>
             <p className="text-[11px] text-slate-500 mt-1">
               Search open grant opportunities across UK funding portals
+              <span className="mx-2 text-slate-300">|</span>
+              <Link
+                to="/grants/database"
+                className="text-blue-600 hover:text-blue-800 font-medium transition-colors"
+              >
+                View Full Database &rarr;
+              </Link>
             </p>
           </div>
           {/* View mode toggle */}

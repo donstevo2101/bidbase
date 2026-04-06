@@ -17,6 +17,7 @@ import DocumentsPage from '../pages/documents/DocumentsPage';
 import AgentWorkspacePage from '../pages/agents/AgentWorkspacePage';
 import FundersPage from '../pages/funders/FundersPage';
 import GrantDiscoveryPage from '../pages/funders/GrantDiscoveryPage';
+import GrantDatabasePage from '../pages/funders/GrantDatabasePage';
 import SettingsPage from '../pages/settings/SettingsPage';
 import ReportsPage from '../pages/reports/ReportsPage';
 import PortalLayout from '../pages/portal/PortalLayout';
@@ -132,6 +133,7 @@ export default function App() {
             <Route path="/pipeline" element={<PlaceholderPage title="Pipeline" />} />
             <Route path="/funders" element={<FundersPage />} />
             <Route path="/grants" element={<GrantDiscoveryPage />} />
+            <Route path="/grants/database" element={<GrantDatabasePage />} />
             <Route path="/documents" element={<DocumentsPage />} />
             <Route path="/agents" element={<AgentWorkspacePage />} />
             <Route path="/reports" element={<ReportsPage />} />
