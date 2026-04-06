@@ -37,72 +37,75 @@ function parseCount(text: string): number {
 }
 
 /**
- * Extracts funder rows from a single GrantNav funders page HTML.
- * The GrantNav funders page uses a table with columns:
- * Funder | Grants | To Organisations | To Individuals | Total to Organisations | Total to Individuals | Latest Award | Earliest Award
+ * Extracts funder cards from a single GrantNav funders page HTML.
+ * The page uses div cards with class "grant-search-result__funders", NOT table rows.
  */
 function parseFundersPage(html: string): FunderRecord[] {
   const funders: FunderRecord[] = [];
 
-  // Find table rows — each funder is a <tr> in the main table body
-  const rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let rowMatch: RegExpExecArray | null;
+  // Split HTML by funder card blocks
+  const cards = html.split('grant-search-result grant-search-result__funders');
 
-  while ((rowMatch = rowPattern.exec(html)) !== null) {
-    const row = rowMatch[1];
+  for (let i = 1; i < cards.length; i++) {
+    const card = cards[i]!;
 
-    // Extract all <td> cells
-    const cellPattern = /<td[^>]*>([\s\S]*?)<\/td>/gi;
-    const cells: string[] = [];
-    let cellMatch: RegExpExecArray | null;
+    // Extract funder name and URL
+    const titleMatch = card.match(/grant-search-result__title"[^>]*href="([^"]*)"[^>]*>\s*([^<]+)/i);
+    if (!titleMatch) continue;
 
-    while ((cellMatch = cellPattern.exec(row)) !== null) {
-      // Strip HTML tags from cell content
-      const cellText = cellMatch[1].replace(/<[^>]+>/g, '').trim();
-      cells.push(cellText);
-    }
-
-    // Need at least 8 columns for a valid funder row
-    if (cells.length < 8) continue;
-
-    // Skip header rows (check if first cell looks like a header)
-    if (cells[0].toLowerCase().includes('funder') && cells[1].toLowerCase().includes('grant')) continue;
-
-    // Extract the funder link URL from the first cell
-    const linkMatch = rowMatch[1].match(/<a[^>]*href="([^"]*)"[^>]*>/i);
-    let grantNavUrl = '';
-    if (linkMatch) {
-      grantNavUrl = linkMatch[1];
-      if (grantNavUrl.startsWith('/')) {
-        grantNavUrl = `https://grantnav.threesixtygiving.org${grantNavUrl}`;
-      }
-    }
-
-    // Extract the funder name from the link text or first cell
-    const nameMatch = rowMatch[1].match(/<a[^>]*>([\s\S]*?)<\/a>/i);
-    const name = nameMatch ? nameMatch[1].replace(/<[^>]+>/g, '').trim() : cells[0];
-
+    const rawUrl = titleMatch[1]!.trim();
+    const name = titleMatch[2]!.trim();
     if (!name || name.length < 2) continue;
+
+    let grantNavUrl = rawUrl;
+    if (grantNavUrl.startsWith('/')) {
+      grantNavUrl = `https://grantnav.threesixtygiving.org${grantNavUrl}`;
+    }
 
     const funder: FunderRecord = {
       name,
-      totalGrants: parseCount(cells[1]),
-      grantsToOrgs: parseCount(cells[2]),
-      grantsToIndividuals: parseCount(cells[3]),
-      totalToOrgs: parseCurrency(cells[4]),
-      totalToIndividuals: parseCurrency(cells[5]),
-      latestAward: cells[6] || null,
-      earliestAward: cells[7] || null,
+      totalGrants: extractBoxValue(card, 'All Grants'),
+      grantsToOrgs: extractBoxValue(card, 'Grants to Organisations'),
+      grantsToIndividuals: extractBoxValue(card, 'Grants to Individuals'),
+      totalToOrgs: extractCurrencyValue(card, 'Total  to Organisations') || extractCurrencyValue(card, 'Total to Organisations'),
+      totalToIndividuals: extractCurrencyValue(card, 'Total  to Individuals') || extractCurrencyValue(card, 'Total to Individuals'),
+      latestAward: extractDateValue(card, 'Latest Award'),
+      earliestAward: extractDateValue(card, 'Earliest Award'),
       grantNavUrl,
     };
 
-    // Only include if we got a meaningful name and at least some data
-    if (funder.name && (funder.totalGrants > 0 || funder.totalToOrgs > 0)) {
+    if (funder.name) {
       funders.push(funder);
     }
   }
 
   return funders;
+}
+
+function extractBoxValue(card: string, label: string): number {
+  // Match: <strong>Label</strong> <br /> 4,403
+  const pattern = new RegExp(label + '[\\s\\S]*?<\\/strong>\\s*(?:<br\\s*\\/?>)?\\s*([\\d,]+)', 'i');
+  const match = card.match(pattern);
+  if (match?.[1]) return parseInt(match[1].replace(/,/g, ''), 10) || 0;
+  return 0;
+}
+
+function extractCurrencyValue(card: string, label: string): number {
+  // Match: <strong>Label</strong><br/> <span...>£30,501,097</span>
+  const pattern = new RegExp(label + '[\\s\\S]*?[£]([\\d,]+(?:\\.\\d+)?)', 'i');
+  const match = card.match(pattern);
+  if (match?.[1]) return parseFloat(match[1].replace(/,/g, '')) || 0;
+  return 0;
+}
+
+function extractDateValue(card: string, label: string): string | null {
+  const pattern = new RegExp(label + '[\\s\\S]*?<\\/strong>\\s*(?:<br\\s*\\/?>)?\\s*([A-Za-z0-9\\s,]+?)\\s*<', 'i');
+  const match = card.match(pattern);
+  if (match?.[1]) {
+    const cleaned = match[1].trim();
+    if (cleaned && cleaned.length > 3) return cleaned;
+  }
+  return null;
 }
 
 /**
