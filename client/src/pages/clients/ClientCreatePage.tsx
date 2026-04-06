@@ -7,70 +7,33 @@ import { toast } from 'sonner';
 import { api } from '../../lib/api';
 
 // ---------------------------------------------------------------------------
-// Types
+// Zod schema
 // ---------------------------------------------------------------------------
 
-interface ParsedField {
-  value: unknown;
-  confidence: number;
-}
+const clientSchema = z.object({
+  name: z.string().min(1, 'Organisation name is required'),
+  type: z.enum(['CIC', 'charity', 'social_enterprise', 'unincorporated', 'other', '']).optional(),
+  primaryContactName: z.string().optional(),
+  primaryContactEmail: z.string().email('Enter a valid email').or(z.literal('')).optional(),
+  primaryContactPhone: z.string().optional(),
+  annualIncome: z.union([z.coerce.number().min(0), z.literal('')]).optional(),
+  registeredNumber: z.string().optional(),
+  addressLine1: z.string().optional(),
+  addressLine2: z.string().optional(),
+  addressCity: z.string().optional(),
+  addressCounty: z.string().optional(),
+  addressPostcode: z.string().optional(),
+  notes: z.string().optional(),
+});
 
-interface ParsedClientData {
-  name?: ParsedField;
-  type?: ParsedField;
-  primaryContactName?: ParsedField;
-  primaryContactEmail?: ParsedField;
-  primaryContactPhone?: ParsedField;
-  annualIncome?: ParsedField;
-  registeredNumber?: ParsedField;
-  addressLine1?: ParsedField;
-  addressLine2?: ParsedField;
-  addressCity?: ParsedField;
-  addressCounty?: ParsedField;
-  addressPostcode?: ParsedField;
-  policiesHeld?: ParsedField;
-  notes?: ParsedField;
-}
+type ClientFormData = z.infer<typeof clientSchema>;
 
-interface ConfirmedField {
-  value: unknown;
-  confirmed: boolean;
-  skipped: boolean;
-}
-
-type Step = 'input-method' | 'processing' | 'field-confirm' | 'review' | 'manual';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const FIELD_DEFS = [
-  { key: 'name', label: 'Organisation Name', type: 'text', required: true },
-  {
-    key: 'type',
-    label: 'Organisation Type',
-    type: 'select',
-    options: [
-      { value: 'CIC', label: 'CIC' },
-      { value: 'charity', label: 'Charity' },
-      { value: 'social_enterprise', label: 'Social Enterprise' },
-      { value: 'unincorporated', label: 'Unincorporated' },
-      { value: 'other', label: 'Other' },
-    ],
-  },
-  { key: 'primaryContactName', label: 'Primary Contact Name', type: 'text' },
-  { key: 'primaryContactEmail', label: 'Primary Contact Email', type: 'email' },
-  { key: 'primaryContactPhone', label: 'Primary Contact Phone', type: 'text' },
-  { key: 'annualIncome', label: 'Annual Income', type: 'currency' },
-  { key: 'registeredNumber', label: 'Registered Number', type: 'text' },
-  {
-    key: 'address',
-    label: 'Address',
-    type: 'address',
-    subFields: ['addressLine1', 'addressLine2', 'addressCity', 'addressCounty', 'addressPostcode'],
-  },
-  { key: 'policiesHeld', label: 'Policies Held', type: 'tags' },
-  { key: 'notes', label: 'Notes', type: 'textarea' },
+// Field names that can be auto-filled
+const FILLABLE_FIELDS = [
+  'name', 'type', 'primaryContactName', 'primaryContactEmail',
+  'primaryContactPhone', 'annualIncome', 'registeredNumber',
+  'addressLine1', 'addressLine2', 'addressCity', 'addressCounty',
+  'addressPostcode', 'notes',
 ] as const;
 
 const ORG_TYPES = [
@@ -83,1434 +46,637 @@ const ORG_TYPES = [
 ];
 
 // ---------------------------------------------------------------------------
-// Zod schema for manual form
+// Types
 // ---------------------------------------------------------------------------
 
-const clientSchema = z.object({
-  name: z.string().min(1, 'Organisation name is required'),
-  type: z.enum(['CIC', 'charity', 'social_enterprise', 'unincorporated', 'other']).optional(),
-  primaryContactName: z.string().optional(),
-  primaryContactEmail: z.string().email('Enter a valid email').or(z.literal('')).optional(),
-  primaryContactPhone: z.string().optional(),
-  annualIncome: z.coerce.number().min(0, 'Must be a positive number').optional().or(z.literal('')),
-  registeredNumber: z.string().optional(),
-  addressLine1: z.string().optional(),
-  addressLine2: z.string().optional(),
-  addressCity: z.string().optional(),
-  addressCounty: z.string().optional(),
-  addressPostcode: z.string().optional(),
-  policiesHeld: z.string().optional(),
-  notes: z.string().optional(),
-});
+type VaState = 'idle' | 'recording' | 'processing';
 
-type ClientForm = z.infer<typeof clientSchema>;
-
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
-
-const inputClass =
-  'w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent';
-const labelClass = 'block text-sm font-medium text-slate-700 mb-1';
-const selectClass =
-  'w-full px-3 py-2 border border-slate-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent';
-const btnPrimary =
-  'px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-400 text-white text-sm font-medium rounded-md transition-colors';
-const btnSecondary =
-  'px-4 py-2 border border-slate-300 text-slate-700 text-sm font-medium rounded-md hover:bg-slate-50 transition-colors';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function confidenceColor(c: number): string {
-  if (c >= 80) return 'bg-emerald-500';
-  if (c >= 50) return 'bg-amber-500';
-  return 'bg-red-500';
+interface ParsedField {
+  value: unknown;
+  confidence: number;
 }
 
-function confidenceLabel(c: number): string {
-  if (c >= 80) return 'High confidence';
-  if (c >= 50) return 'Medium confidence';
-  return 'Low confidence';
-}
-
-function getFieldValue(parsed: ParsedClientData | null, key: string): unknown {
-  if (!parsed) return undefined;
-  return (parsed as Record<string, ParsedField | undefined>)[key]?.value;
-}
-
-function getFieldConfidence(parsed: ParsedClientData | null, key: string): number {
-  if (!parsed) return 0;
-  return (parsed as Record<string, ParsedField | undefined>)[key]?.confidence ?? 0;
-}
-
-function formatCurrency(value: unknown): string {
-  if (value === undefined || value === null || value === '') return '';
-  const num = Number(value);
-  if (isNaN(num)) return String(value);
-  return num.toLocaleString('en-GB');
-}
+type ParsedResponse = Record<string, ParsedField | undefined>;
 
 // ---------------------------------------------------------------------------
-// Step indicator
-// ---------------------------------------------------------------------------
-
-function StepIndicator({ currentStep }: { currentStep: Step }) {
-  const steps: { key: Step | Step[]; label: string }[] = [
-    { key: ['input-method'], label: 'Input' },
-    { key: ['processing'], label: 'Processing' },
-    { key: ['field-confirm'], label: 'Confirm' },
-    { key: ['review'], label: 'Submit' },
-  ];
-
-  if (currentStep === 'manual') return null;
-
-  const currentIdx = steps.findIndex((s) =>
-    Array.isArray(s.key) ? s.key.includes(currentStep) : s.key === currentStep
-  );
-
-  return (
-    <div className="flex items-center justify-center gap-2 mb-8">
-      {steps.map((s, i) => {
-        const isActive = i === currentIdx;
-        const isDone = i < currentIdx;
-        return (
-          <div key={s.label} className="flex items-center gap-2">
-            <div
-              className={`flex items-center justify-center w-8 h-8 rounded-full text-xs font-semibold transition-colors ${
-                isActive
-                  ? 'bg-teal-600 text-white'
-                  : isDone
-                  ? 'bg-teal-100 text-teal-700'
-                  : 'bg-slate-100 text-slate-400'
-              }`}
-            >
-              {isDone ? (
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-              ) : (
-                i + 1
-              )}
-            </div>
-            <span
-              className={`text-xs font-medium ${
-                isActive ? 'text-teal-700' : isDone ? 'text-teal-600' : 'text-slate-400'
-              }`}
-            >
-              {s.label}
-            </span>
-            {i < steps.length - 1 && <div className="w-8 h-px bg-slate-300" />}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Main component
+// Component
 // ---------------------------------------------------------------------------
 
 export default function ClientCreatePage() {
   const navigate = useNavigate();
 
-  // Step state
-  const [step, setStep] = useState<Step>('input-method');
-  const [inputMethod, setInputMethod] = useState<'document' | 'voice' | 'manual' | null>(null);
-
-  // Parsed data from AI
-  const [parsedData, setParsedData] = useState<ParsedClientData | null>(null);
-  const [_isProcessing, setIsProcessing] = useState(false);
-  const [processingError, setProcessingError] = useState<string | null>(null);
-
-  // Field confirmation state
-  const [currentFieldIndex, setCurrentFieldIndex] = useState(0);
-  const [confirmedFields, setConfirmedFields] = useState<Record<string, ConfirmedField>>({});
-
-  // Voice state
-  const [isRecording, setIsRecording] = useState(false);
-  const [transcript, setTranscript] = useState('');
-  const [interimTranscript, setInterimTranscript] = useState('');
-  const [micError, setMicError] = useState<string | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const recognitionRef = useRef<any>(null);
-
-  // Document drop state
-  const [dragOver, setDragOver] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Submitting
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Manual form
   const {
     register,
     handleSubmit,
-    formState: { errors },
-  } = useForm<ClientForm>({
+    setValue,
+    formState: { errors, isSubmitting },
+  } = useForm<ClientFormData>({
     resolver: zodResolver(clientSchema),
+    defaultValues: {
+      name: '',
+      type: '',
+      primaryContactName: '',
+      primaryContactEmail: '',
+      primaryContactPhone: '',
+      annualIncome: '',
+      registeredNumber: '',
+      addressLine1: '',
+      addressLine2: '',
+      addressCity: '',
+      addressCounty: '',
+      addressPostcode: '',
+      notes: '',
+    },
   });
 
-  // -----------------------------------------------------------------------
-  // Document handling
-  // -----------------------------------------------------------------------
+  // -- Policies (managed separately as tags) --------------------------------
+  const [policies, setPolicies] = useState<string[]>([]);
+  const [policyInput, setPolicyInput] = useState('');
 
-  const handleFile = useCallback(async (file: File) => {
-    setInputMethod('document');
-    setStep('processing');
-    setIsProcessing(true);
-    setProcessingError(null);
-
-    try {
-      // Read file — use base64 for binary files (PDF, images), text for plain text
-      let content: string;
-      const isTextFile = file.type.startsWith('text/') || file.name.endsWith('.txt') || file.name.endsWith('.csv');
-
-      if (isTextFile) {
-        content = await file.text();
-      } else {
-        // Read as base64 for PDFs, Word docs, images
-        const buffer = await file.arrayBuffer();
-        const bytes = new Uint8Array(buffer);
-        let binary = '';
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]!);
-        }
-        content = btoa(binary);
-      }
-
-      const result = await api.post<ParsedClientData>('/client-parser/parse-document', {
-        content,
-        fileName: file.name,
-        mimeType: file.type || 'application/octet-stream',
-      });
-
-      if (!result.success) {
-        throw new Error(result.error.message);
-      }
-
-      setParsedData(result.data);
-      initConfirmedFields(result.data);
-      setStep('field-confirm');
-    } catch (err) {
-      console.error('[ClientParser] Document parse error:', err);
-      setProcessingError(err instanceof Error ? err.message : 'Failed to parse document. Please try a different file format or use voice input.');
-      setStep('processing'); // Stay on processing step to show the error
-    } finally {
-      setIsProcessing(false);
+  const addPolicy = (text: string) => {
+    const trimmed = text.trim();
+    if (trimmed && !policies.includes(trimmed)) {
+      setPolicies((prev) => [...prev, trimmed]);
     }
+  };
+
+  const removePolicy = (idx: number) => {
+    setPolicies((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handlePolicyKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      addPolicy(policyInput);
+      setPolicyInput('');
+    }
+  };
+
+  // -- VA state -------------------------------------------------------------
+  const [vaState, setVaState] = useState<VaState>('idle');
+  const [transcript, setTranscript] = useState('');
+  const [interimTranscript, setInterimTranscript] = useState('');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
+
+  // -- Auto-fill highlight --------------------------------------------------
+  const [filledFields, setFilledFields] = useState<Set<string>>(new Set());
+  const filledTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  const markFilled = useCallback((fieldName: string) => {
+    setFilledFields((prev) => new Set(prev).add(fieldName));
+    // Clear previous timer if any
+    const existing = filledTimers.current.get(fieldName);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      setFilledFields((prev) => {
+        const next = new Set(prev);
+        next.delete(fieldName);
+        return next;
+      });
+      filledTimers.current.delete(fieldName);
+    }, 2000);
+    filledTimers.current.set(fieldName, timer);
   }, []);
 
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      const file = e.dataTransfer.files[0];
-      if (file) handleFile(file);
+  // Cleanup timers on unmount
+  useEffect(() => {
+    return () => {
+      filledTimers.current.forEach((t) => clearTimeout(t));
+    };
+  }, []);
+
+  // -- Apply parsed data to form --------------------------------------------
+  const applyParsedData = useCallback(
+    (parsed: ParsedResponse) => {
+      for (const field of FILLABLE_FIELDS) {
+        const entry = parsed[field];
+        if (entry && entry.value !== undefined && entry.value !== null && entry.value !== '') {
+          setValue(field, entry.value as any, { shouldValidate: true });
+          markFilled(field);
+        }
+      }
+      // Handle policies
+      const policiesEntry = parsed['policiesHeld'];
+      if (policiesEntry?.value) {
+        const raw = policiesEntry.value;
+        let items: string[] = [];
+        if (Array.isArray(raw)) {
+          items = raw.map((p: any) => String(p).trim()).filter(Boolean);
+        } else if (typeof raw === 'string') {
+          items = raw.split(',').map((p) => p.trim()).filter(Boolean);
+        }
+        if (items.length) {
+          setPolicies(items);
+          markFilled('policiesHeld');
+        }
+      }
     },
-    [handleFile]
+    [setValue, markFilled],
   );
 
-  const onFileSelect = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) handleFile(file);
-    },
-    [handleFile]
-  );
-
-  // -----------------------------------------------------------------------
-  // Voice handling
-  // -----------------------------------------------------------------------
-
+  // -- Speech recognition ---------------------------------------------------
   const startRecording = useCallback(() => {
-    setMicError(null);
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      setMicError('Speech recognition is not supported in this browser. Please use Chrome or Edge.');
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      toast.error('Speech recognition not supported in this browser');
       return;
     }
 
-    const recognition = new SR();
+    const recognition = new SpeechRecognitionCtor();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-GB';
 
+    let finalText = '';
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onresult = (event: any) => {
-      let finalText = '';
-      let interimText = '';
+      let interim = '';
       for (let i = 0; i < event.results.length; i++) {
         const result = event.results[i];
         if (result.isFinal) {
           finalText += result[0].transcript + ' ';
         } else {
-          interimText += result[0].transcript;
+          interim += result[0].transcript;
         }
       }
-      if (finalText) {
-        setTranscript((prev) => prev + finalText);
-      }
-      setInterimTranscript(interimText);
+      setTranscript(finalText.trim());
+      setInterimTranscript(interim);
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onerror = (event: any) => {
-      if (event.error === 'not-allowed') {
-        setMicError('Microphone access was denied. Please allow microphone permissions and try again.');
-      } else {
-        setMicError(`Speech recognition error: ${event.error}`);
+      console.error('Speech recognition error', event.error);
+      if (event.error !== 'no-speech') {
+        toast.error(`Speech error: ${event.error}`);
       }
-      setIsRecording(false);
+      setVaState('idle');
     };
 
     recognition.onend = () => {
-      // Do not auto-restart -- user controls via Done Speaking
+      // Only set idle if we didn't trigger stop manually (processing)
+      setVaState((s) => (s === 'recording' ? 'idle' : s));
     };
 
     recognitionRef.current = recognition;
+    setTranscript('');
+    setInterimTranscript('');
+    setVaState('recording');
     recognition.start();
-    setIsRecording(true);
   }, []);
 
-  const stopRecording = useCallback(async () => {
+  const stopAndParse = useCallback(async () => {
     if (recognitionRef.current) {
       recognitionRef.current.stop();
       recognitionRef.current = null;
     }
-    setIsRecording(false);
 
-    const fullTranscript = transcript + interimTranscript;
+    const fullTranscript = transcript || interimTranscript;
     if (!fullTranscript.trim()) {
-      setMicError('No speech was detected. Please try again.');
+      toast.error('No speech detected — please try again');
+      setVaState('idle');
       return;
     }
 
-    setStep('processing');
-    setIsProcessing(true);
-    setProcessingError(null);
-
+    setVaState('processing');
     try {
-      const result = await api.post<ParsedClientData>('/client-parser/parse-voice', {
-        transcript: fullTranscript.trim(),
+      const res = await api.post<ParsedResponse>('/client-parser/parse-voice', {
+        transcript: fullTranscript,
       });
 
-      if (!result.success) {
-        throw new Error(result.error.message);
-      }
-
-      setParsedData(result.data);
-      initConfirmedFields(result.data);
-      setStep('field-confirm');
-    } catch (err) {
-      setProcessingError(err instanceof Error ? err.message : 'Failed to parse voice input');
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [transcript, interimTranscript]);
-
-  // Clean up recognition on unmount
-  useEffect(() => {
-    return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-    };
-  }, []);
-
-  // -----------------------------------------------------------------------
-  // Field confirmation helpers
-  // -----------------------------------------------------------------------
-
-  function initConfirmedFields(data: ParsedClientData) {
-    const fields: Record<string, ConfirmedField> = {};
-    for (const def of FIELD_DEFS) {
-      if (def.type === 'address') {
-        for (const sub of def.subFields) {
-          const val = getFieldValue(data, sub);
-          fields[sub] = { value: val ?? '', confirmed: false, skipped: false };
-        }
+      if (res.success && res.data) {
+        applyParsedData(res.data);
+        toast.success('Form auto-filled from voice');
       } else {
-        const val = getFieldValue(data, def.key);
-        fields[def.key] = { value: val ?? '', confirmed: false, skipped: false };
+        toast.error('Could not parse voice input');
       }
-    }
-    setConfirmedFields(fields);
-  }
-
-  function updateFieldValue(key: string, value: unknown) {
-    setConfirmedFields((prev) => {
-      const existing = prev[key] ?? { value: '', confirmed: false, skipped: false };
-      return { ...prev, [key]: { ...existing, value } };
-    });
-  }
-
-  function confirmField(key: string) {
-    setConfirmedFields((prev) => {
-      const existing = prev[key] ?? { value: '', confirmed: false, skipped: false };
-      return { ...prev, [key]: { ...existing, confirmed: true, skipped: false } };
-    });
-  }
-
-  function skipField(key: string) {
-    setConfirmedFields((prev) => {
-      const existing = prev[key] ?? { value: '', confirmed: false, skipped: false };
-      return { ...prev, [key]: { ...existing, skipped: true, confirmed: false } };
-    });
-  }
-
-  function confirmCurrentAndNext() {
-    const def = FIELD_DEFS[currentFieldIndex];
-    if (!def) return;
-    if (def.type === 'address' && 'subFields' in def) {
-      for (const sub of (def as unknown as { subFields: readonly string[] }).subFields) {
-        confirmField(sub);
-      }
-    } else {
-      confirmField(def.key);
-    }
-    advanceField();
-  }
-
-  function skipCurrentAndNext() {
-    const def = FIELD_DEFS[currentFieldIndex];
-    if (!def) return;
-    if (def.type === 'address' && 'subFields' in def) {
-      for (const sub of (def as unknown as { subFields: readonly string[] }).subFields) {
-        skipField(sub);
-      }
-    } else {
-      skipField(def.key);
-    }
-    advanceField();
-  }
-
-  function advanceField() {
-    if (currentFieldIndex < FIELD_DEFS.length - 1) {
-      setCurrentFieldIndex((i) => i + 1);
-    } else {
-      setStep('review');
-    }
-  }
-
-  function goBackField() {
-    if (currentFieldIndex > 0) {
-      setCurrentFieldIndex((i) => i - 1);
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // Tag input helpers (for policiesHeld)
-  // -----------------------------------------------------------------------
-
-  const [tagInput, setTagInput] = useState('');
-
-  function addTag() {
-    const tag = tagInput.trim();
-    if (!tag) return;
-    const current = (confirmedFields['policiesHeld']?.value as string[]) || [];
-    if (!current.includes(tag)) {
-      updateFieldValue('policiesHeld', [...current, tag]);
-    }
-    setTagInput('');
-  }
-
-  function removeTag(tag: string) {
-    const current = (confirmedFields['policiesHeld']?.value as string[]) || [];
-    updateFieldValue(
-      'policiesHeld',
-      current.filter((t: string) => t !== tag)
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Submit
-  // -----------------------------------------------------------------------
-
-  async function submitConfirmed() {
-    setIsSubmitting(true);
-    try {
-      const payload: Record<string, unknown> = {};
-      for (const [key, field] of Object.entries(confirmedFields)) {
-        if (!field.skipped && field.value !== '' && field.value !== undefined) {
-          payload[key] = field.value;
-        }
-      }
-
-      const result = await api.post<{ id: string }>('/client-parser/confirm', payload);
-
-      if (!result.success) {
-        throw new Error(result.error.message);
-      }
-
-      toast.success('Client created successfully');
-      navigate(`/clients/${result.data.id}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to create client');
-    } finally {
-      setIsSubmitting(false);
+      console.error(err);
+      toast.error('Failed to parse voice input');
     }
-  }
+    setVaState('idle');
+  }, [transcript, interimTranscript, applyParsedData]);
 
-  async function submitManual(data: ClientForm) {
-    setIsSubmitting(true);
+  // -- File upload ----------------------------------------------------------
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      setVaState('processing');
+
+      try {
+        let content: string;
+        const isText =
+          file.type.startsWith('text/') ||
+          file.name.endsWith('.txt') ||
+          file.name.endsWith('.csv');
+
+        if (isText) {
+          content = await file.text();
+        } else {
+          // Read as base64 for binary (PDF, Word, etc.)
+          const buffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(buffer);
+          let binary = '';
+          bytes.forEach((b) => (binary += String.fromCharCode(b)));
+          content = btoa(binary);
+        }
+
+        const res = await api.post<ParsedResponse>('/client-parser/parse-document', {
+          content,
+          fileName: file.name,
+          mimeType: file.type || 'application/octet-stream',
+        });
+
+        if (res.success && res.data) {
+          applyParsedData(res.data);
+          toast.success('Form auto-filled from document');
+        } else {
+          toast.error('Could not parse document');
+        }
+      } catch (err) {
+        console.error(err);
+        toast.error('Failed to parse document');
+      }
+
+      setVaState('idle');
+      // Reset file input
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    },
+    [applyParsedData],
+  );
+
+  // -- Submit ---------------------------------------------------------------
+  const onSubmit = async (data: ClientFormData) => {
     try {
-      const policiesArray = data.policiesHeld
-        ? data.policiesHeld
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean)
-        : undefined;
-
       const payload = {
-        name: data.name,
-        type: data.type || undefined,
-        stage: 'A',
-        primary_contact_name: data.primaryContactName || undefined,
-        primary_contact_email: data.primaryContactEmail || undefined,
-        primary_contact_phone: data.primaryContactPhone || undefined,
-        annual_income: data.annualIncome ? Number(data.annualIncome) : undefined,
-        registered_number: data.registeredNumber || undefined,
-        address: data.addressLine1
-          ? {
-              line1: data.addressLine1,
-              line2: data.addressLine2 || undefined,
-              city: data.addressCity || undefined,
-              county: data.addressCounty || undefined,
-              postcode: data.addressPostcode || undefined,
-            }
-          : undefined,
-        policies_held: policiesArray,
-        notes: data.notes || undefined,
+        ...data,
+        policiesHeld: policies,
+        annualIncome: data.annualIncome === '' ? undefined : Number(data.annualIncome),
       };
 
-      const result = await api.post<{ id: string }>('/clients', payload);
+      // Use confirm endpoint if fields were auto-filled, else standard
+      const res = await api.post<{ id: string; name: string }>(
+        '/client-parser/confirm',
+        payload,
+      );
 
-      if (!result.success) {
-        throw new Error(result.error.message);
+      if (res.success && res.data?.id) {
+        toast.success(`Client "${res.data.name}" created`);
+        navigate(`/clients/${res.data.id}`);
+      } else {
+        // Fallback to standard route
+        const fallback = await api.post<{ id: string; name: string }>('/clients', payload);
+        if (fallback.success && fallback.data?.id) {
+          toast.success(`Client "${fallback.data.name}" created`);
+          navigate(`/clients/${fallback.data.id}`);
+        } else {
+          toast.error('Failed to create client');
+        }
       }
-
-      toast.success('Client created successfully');
-      navigate(`/clients/${result.data.id}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to create client');
-    } finally {
-      setIsSubmitting(false);
+      console.error(err);
+      toast.error('Failed to create client');
     }
-  }
+  };
 
-  // -----------------------------------------------------------------------
-  // Render: Step 1 — Input method selection
-  // -----------------------------------------------------------------------
+  // -- Helpers for input classes with auto-fill highlight --------------------
+  const inputBase =
+    'w-full h-9 px-3 border rounded-md text-[13px] text-[#111827] focus:outline-none focus:ring-2 focus:ring-[#2563eb] transition-all duration-300';
+  const borderClass = (field: string) =>
+    filledFields.has(field)
+      ? 'border-[#16a34a] border-2 bg-green-50/40'
+      : 'border-[#e5e7eb]';
 
-  function renderInputMethodStep() {
-    return (
-      <div className="max-w-3xl mx-auto">
-        <h2 className="text-lg font-semibold text-slate-900 text-center mb-2">
-          How would you like to add this client?
-        </h2>
-        <p className="text-sm text-slate-500 text-center mb-8">
-          Upload a document or use your voice, and AI will extract the client details for you.
-        </p>
+  const labelCls = 'block text-xs font-medium uppercase tracking-wide text-[#6b7280] mb-1';
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Upload Document */}
+  // -------------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------------
+
+  return (
+    <div className="min-h-screen bg-gray-50 pb-12">
+      {/* Header */}
+      <div className="bg-white border-b border-gray-200">
+        <div className="max-w-3xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm">
+            <Link to="/clients" className="text-[#6b7280] hover:text-[#111827]">
+              Clients
+            </Link>
+            <span className="text-[#d1d5db]">/</span>
+            <span className="text-[#111827] font-medium">Add New Client</span>
+          </div>
           <button
             type="button"
-            onClick={() => {
-              setInputMethod('document');
-              fileInputRef.current?.click();
-            }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={onDrop}
-            className={`flex flex-col items-center gap-3 p-8 border-2 border-dashed rounded-lg transition-colors cursor-pointer hover:border-teal-400 hover:bg-teal-50/50 ${
-              dragOver ? 'border-teal-500 bg-teal-50' : 'border-slate-300'
-            }`}
+            onClick={handleSubmit(onSubmit)}
+            disabled={isSubmitting}
+            className="px-4 py-2 bg-[#2563eb] hover:bg-[#1d4ed8] disabled:opacity-50 text-white text-sm font-medium rounded-md transition-colors"
           >
-            <span className="text-4xl" role="img" aria-label="Document">
-              {'\uD83D\uDCC4'}
-            </span>
-            <span className="text-sm font-semibold text-slate-800">Upload Document</span>
-            <span className="text-xs text-slate-500 text-center">
-              PDF, Word, or text file with client information
-            </span>
-          </button>
-
-          {/* Voice Input */}
-          <button
-            type="button"
-            onClick={() => {
-              setInputMethod('voice');
-              startRecording();
-            }}
-            className="flex flex-col items-center gap-3 p-8 border-2 border-dashed border-slate-300 rounded-lg transition-colors cursor-pointer hover:border-teal-400 hover:bg-teal-50/50"
-          >
-            <span className="text-4xl" role="img" aria-label="Microphone">
-              {'\uD83C\uDFA4'}
-            </span>
-            <span className="text-sm font-semibold text-slate-800">Voice Input</span>
-            <span className="text-xs text-slate-500 text-center">
-              Speak the client details and AI will transcribe them
-            </span>
-          </button>
-
-          {/* Manual Entry */}
-          <button
-            type="button"
-            onClick={() => {
-              setInputMethod('manual');
-              setStep('manual');
-            }}
-            className="flex flex-col items-center gap-3 p-8 border-2 border-dashed border-slate-300 rounded-lg transition-colors cursor-pointer hover:border-teal-400 hover:bg-teal-50/50"
-          >
-            <span className="text-4xl" role="img" aria-label="Pencil">
-              {'\u270F\uFE0F'}
-            </span>
-            <span className="text-sm font-semibold text-slate-800">Manual Entry</span>
-            <span className="text-xs text-slate-500 text-center">
-              Fill in the form fields yourself
-            </span>
+            {isSubmitting ? 'Saving...' : 'Save'}
           </button>
         </div>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          className="hidden"
-          accept=".pdf,.doc,.docx,.txt,.rtf,.csv,.png,.jpg,.jpeg"
-          onChange={onFileSelect}
-        />
       </div>
-    );
-  }
 
-  // -----------------------------------------------------------------------
-  // Render: Voice recording overlay
-  // -----------------------------------------------------------------------
-
-  function renderVoiceRecording() {
-    return (
-      <div className="max-w-xl mx-auto text-center">
-        {micError ? (
-          <div className="p-6">
-            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-100 flex items-center justify-center">
-              <svg className="w-8 h-8 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </div>
-            <p className="text-sm text-red-600 mb-4">{micError}</p>
-            <button
-              type="button"
-              onClick={() => {
-                setMicError(null);
-                setInputMethod(null);
-                setStep('input-method');
-              }}
-              className={btnSecondary}
-            >
-              Go back
-            </button>
+      <div className="max-w-3xl mx-auto px-6 mt-6">
+        {/* VA Agent Card */}
+        <div
+          className="rounded-lg p-6 mb-8"
+          style={{
+            background: 'linear-gradient(135deg, #0f1923 0%, #1a2d42 100%)',
+          }}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-lg">📋</span>
+            <span className="text-white font-semibold text-base">VA Agent</span>
           </div>
-        ) : (
-          <div className="p-6">
-            {/* Pulsing mic button */}
-            <button
-              type="button"
-              className={`relative w-24 h-24 mx-auto mb-6 rounded-full flex items-center justify-center transition-colors ${
-                isRecording ? 'bg-red-500' : 'bg-slate-200'
-              }`}
-              onClick={isRecording ? stopRecording : startRecording}
-            >
-              {isRecording && (
-                <span className="absolute inset-0 rounded-full bg-red-400 animate-ping opacity-30" />
+          <p className="text-gray-400 text-sm mb-5">
+            Speak or upload to auto-fill the form below
+          </p>
+
+          {/* Recording / Processing states */}
+          {vaState === 'recording' ? (
+            <div className="flex flex-col items-center py-4">
+              {/* Pulsing mic */}
+              <div className="relative mb-4">
+                <div className="absolute inset-0 rounded-full bg-red-500/30 animate-ping" />
+                <div className="relative w-16 h-16 rounded-full bg-red-500 flex items-center justify-center">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" y1="19" x2="12" y2="23" />
+                    <line x1="8" y1="23" x2="16" y2="23" />
+                  </svg>
+                </div>
+              </div>
+              <p className="text-white text-sm font-medium mb-1">Listening...</p>
+
+              {/* Live transcript */}
+              {(transcript || interimTranscript) && (
+                <div className="w-full mt-3 p-3 rounded-md bg-white/10 max-h-32 overflow-y-auto">
+                  <p className="text-gray-200 text-sm leading-relaxed">
+                    {transcript}
+                    {interimTranscript && (
+                      <span className="text-gray-400 italic"> {interimTranscript}</span>
+                    )}
+                  </p>
+                </div>
               )}
-              <svg
-                className={`w-10 h-10 relative z-10 ${isRecording ? 'text-white' : 'text-slate-500'}`}
-                fill="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
-                <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
-              </svg>
-            </button>
 
-            <p className="text-sm font-medium text-slate-700 mb-1">
-              {isRecording ? 'Listening...' : 'Click the microphone to start'}
-            </p>
-            <p className="text-xs text-slate-500 mb-6">
-              Speak clearly about the client — name, contact details, organisation type, etc.
-            </p>
-
-            {/* Live transcript */}
-            <div className="min-h-[120px] p-4 bg-slate-50 rounded-lg border border-slate-200 text-left mb-6">
-              {transcript || interimTranscript ? (
-                <p className="text-sm text-slate-800 whitespace-pre-wrap">
-                  {transcript}
-                  <span className="text-slate-400">{interimTranscript}</span>
-                </p>
-              ) : (
-                <p className="text-sm text-slate-400 italic">Your speech will appear here...</p>
-              )}
-            </div>
-
-            <div className="flex items-center justify-center gap-3">
               <button
                 type="button"
-                onClick={() => {
-                  if (recognitionRef.current) recognitionRef.current.stop();
-                  setIsRecording(false);
-                  setTranscript('');
-                  setInterimTranscript('');
-                  setInputMethod(null);
-                  setStep('input-method');
-                }}
-                className={btnSecondary}
+                onClick={stopAndParse}
+                className="mt-4 px-5 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-medium rounded-md transition-colors"
               >
-                Cancel
+                Done Speaking
               </button>
-              {isRecording && (
-                <button type="button" onClick={stopRecording} className={btnPrimary}>
-                  Done Speaking
-                </button>
-              )}
             </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Render: Step 2 — Processing
-  // -----------------------------------------------------------------------
-
-  function renderProcessingStep() {
-    if (processingError) {
-      return (
-        <div className="max-w-md mx-auto text-center p-8">
-          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-100 flex items-center justify-center">
-            <svg className="w-8 h-8 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </div>
-          <p className="text-sm text-red-600 mb-4">{processingError}</p>
-          <button
-            type="button"
-            onClick={() => {
-              setProcessingError(null);
-              setInputMethod(null);
-              setStep('input-method');
-            }}
-            className={btnSecondary}
-          >
-            Try again
-          </button>
-        </div>
-      );
-    }
-
-    return (
-      <div className="max-w-md mx-auto text-center p-8">
-        <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-teal-50 flex items-center justify-center">
-          <svg
-            className="w-8 h-8 text-teal-600 animate-spin"
-            fill="none"
-            viewBox="0 0 24 24"
-          >
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path
-              className="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            />
-          </svg>
-        </div>
-        <p className="text-sm font-medium text-slate-700">AI is extracting client information...</p>
-        <p className="text-xs text-slate-500 mt-1">This usually takes a few seconds.</p>
-      </div>
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Render: Step 3 — Field-by-field confirmation
-  // -----------------------------------------------------------------------
-
-  function renderFieldConfirmation() {
-    const def = FIELD_DEFS[currentFieldIndex]!;
-
-    return (
-      <div className="max-w-xl mx-auto">
-        {/* Progress */}
-        <div className="flex items-center justify-between mb-6">
-          <span className="text-xs font-medium text-slate-500">
-            Field {currentFieldIndex + 1} of {FIELD_DEFS.length}
-          </span>
-          <div className="flex-1 mx-4 h-1.5 bg-slate-200 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-teal-500 rounded-full transition-all duration-300"
-              style={{ width: `${((currentFieldIndex + 1) / FIELD_DEFS.length) * 100}%` }}
-            />
-          </div>
-        </div>
-
-        {/* Field card */}
-        <div className="border border-slate-200 rounded-xl p-8 bg-white shadow-sm transition-opacity duration-200">
-          <h3 className="text-lg font-semibold text-slate-900 mb-4">{def.label}</h3>
-
-          {/* AI extraction info */}
-          {def.type === 'address' ? (
-            renderAddressExtraction(def)
+          ) : vaState === 'processing' ? (
+            <div className="flex flex-col items-center py-6">
+              <div className="w-8 h-8 border-2 border-teal-400 border-t-transparent rounded-full animate-spin mb-3" />
+              <p className="text-gray-300 text-sm">Processing...</p>
+            </div>
           ) : (
-            renderSingleFieldExtraction(def)
+            /* Idle — show buttons */
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={startRecording}
+                className="flex items-center gap-2 px-5 py-2.5 bg-teal-500 hover:bg-teal-600 text-white text-sm font-medium rounded-md transition-colors"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+                Start Speaking
+              </button>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-2 px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white text-sm font-medium rounded-md border border-white/20 transition-colors"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="12" y1="18" x2="12" y2="12" />
+                  <line x1="9" y1="15" x2="15" y2="15" />
+                </svg>
+                Upload Document
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.doc,.docx,.txt,.csv,.rtf"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+            </div>
           )}
 
-          {/* Navigation buttons */}
-          <div className="flex items-center justify-between mt-8 pt-4 border-t border-slate-100">
-            <button
-              type="button"
-              onClick={goBackField}
-              disabled={currentFieldIndex === 0}
-              className={`${btnSecondary} ${currentFieldIndex === 0 ? 'opacity-40 cursor-not-allowed' : ''}`}
-            >
-              <span className="inline-flex items-center gap-1">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-                </svg>
-                Back
-              </span>
-            </button>
-
-            <div className="flex items-center gap-2">
-              <button type="button" onClick={skipCurrentAndNext} className={btnSecondary}>
-                Skip
-              </button>
-              <button type="button" onClick={confirmCurrentAndNext} className={btnPrimary}>
-                <span className="inline-flex items-center gap-1">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                  </svg>
-                  Confirm &amp; Next
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                  </svg>
-                </span>
-              </button>
-            </div>
-          </div>
+          {vaState === 'idle' && (
+            <p className="text-gray-500 text-xs mt-4 italic">
+              "Speak the client details and I'll fill in the form below automatically"
+            </p>
+          )}
         </div>
-      </div>
-    );
-  }
 
-  function renderSingleFieldExtraction(def: (typeof FIELD_DEFS)[number]) {
-    const extracted = getFieldValue(parsedData, def.key);
-    const confidence = getFieldConfidence(parsedData, def.key);
-    const currentValue = confirmedFields[def.key]?.value ?? '';
-
-    return (
-      <>
-        {/* Extraction badge */}
-        {extracted !== undefined && extracted !== '' && (
-          <div className="mb-4 p-3 bg-slate-50 rounded-lg border border-slate-100">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-medium text-slate-500">AI extracted:</span>
-              <span className="text-sm font-semibold text-slate-800">
-                {def.type === 'currency' ? `\u00A3${formatCurrency(extracted)}` : String(extracted)}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-500" title={confidenceLabel(confidence)}>
-                Confidence:
-              </span>
-              <div className="flex-1 max-w-[120px] h-2 bg-slate-200 rounded-full overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all ${confidenceColor(confidence)}`}
-                  style={{ width: `${confidence}%` }}
-                />
-              </div>
-              <span className="text-xs font-medium text-slate-600">{confidence}%</span>
-            </div>
-          </div>
-        )}
-
-        {/* Editable input */}
-        {def.type === 'select' && 'options' in def ? (
-          <select
-            className={selectClass}
-            value={String(currentValue)}
-            onChange={(e) => updateFieldValue(def.key, e.target.value)}
-          >
-            <option value="">Select type...</option>
-            {def.options.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        ) : def.type === 'currency' ? (
-          <div className="relative">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-              {'\u00A3'}
-            </span>
+        {/* Form */}
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+          {/* Organisation Name */}
+          <div>
+            <label className={labelCls}>
+              Organisation Name <span className="text-red-500">*</span>
+            </label>
             <input
-              type="number"
-              className={`${inputClass} pl-7`}
-              value={currentValue === undefined ? '' : String(currentValue)}
-              onChange={(e) => updateFieldValue(def.key, e.target.value ? Number(e.target.value) : '')}
-              min="0"
-              step="1"
+              {...register('name')}
+              className={`${inputBase} ${borderClass('name')}`}
+              placeholder="e.g. Time2Corner CIC"
+            />
+            {errors.name && (
+              <p className="text-red-500 text-xs mt-1">{errors.name.message}</p>
+            )}
+          </div>
+
+          {/* Type */}
+          <div>
+            <label className={labelCls}>Type</label>
+            <select
+              {...register('type')}
+              className={`${inputBase} ${borderClass('type')} bg-white`}
+            >
+              {ORG_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Contact Name */}
+          <div>
+            <label className={labelCls}>Contact Name</label>
+            <input
+              {...register('primaryContactName')}
+              className={`${inputBase} ${borderClass('primaryContactName')}`}
             />
           </div>
-        ) : def.type === 'tags' ? (
+
+          {/* Contact Email */}
           <div>
-            <div className="flex flex-wrap gap-2 mb-3">
-              {(Array.isArray(currentValue) ? currentValue : []).map((tag: string) => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-teal-50 text-teal-700 rounded-full border border-teal-200"
-                >
-                  {tag}
-                  <button
-                    type="button"
-                    onClick={() => removeTag(tag)}
-                    className="text-teal-400 hover:text-teal-700"
-                  >
-                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </span>
-              ))}
-              {(Array.isArray(currentValue) ? currentValue : []).length === 0 && (
-                <span className="text-xs text-slate-400 italic">No policies added</span>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                className={inputClass}
-                placeholder="Type a policy name and press Add"
-                value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    addTag();
-                  }
-                }}
-              />
-              <button type="button" onClick={addTag} className={btnSecondary}>
-                Add
-              </button>
-            </div>
-          </div>
-        ) : def.type === 'textarea' ? (
-          <textarea
-            className={inputClass}
-            rows={4}
-            value={String(currentValue ?? '')}
-            onChange={(e) => updateFieldValue(def.key, e.target.value)}
-            placeholder={`Enter ${def.label.toLowerCase()}...`}
-          />
-        ) : (
-          <input
-            type={def.type === 'email' ? 'email' : 'text'}
-            className={inputClass}
-            value={String(currentValue ?? '')}
-            onChange={(e) => updateFieldValue(def.key, e.target.value)}
-            placeholder={`Enter ${def.label.toLowerCase()}...`}
-          />
-        )}
-
-        {'required' in def && def.required && !currentValue && (
-          <p className="mt-1 text-xs text-red-600">This field is required.</p>
-        )}
-      </>
-    );
-  }
-
-  function renderAddressExtraction(def: (typeof FIELD_DEFS)[number]) {
-    if (def.type !== 'address') return null;
-
-    const subLabels: Record<string, string> = {
-      addressLine1: 'Address Line 1',
-      addressLine2: 'Address Line 2',
-      addressCity: 'City / Town',
-      addressCounty: 'County',
-      addressPostcode: 'Postcode',
-    };
-
-    // Show aggregate confidence
-    const confidences = def.subFields.map((k) => getFieldConfidence(parsedData, k)).filter((c) => c > 0);
-    const avgConfidence =
-      confidences.length > 0 ? Math.round(confidences.reduce((a, b) => a + b, 0) / confidences.length) : 0;
-
-    return (
-      <>
-        {avgConfidence > 0 && (
-          <div className="mb-4 p-3 bg-slate-50 rounded-lg border border-slate-100">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-medium text-slate-500">AI extracted address fields</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-500">Average confidence:</span>
-              <div className="flex-1 max-w-[120px] h-2 bg-slate-200 rounded-full overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all ${confidenceColor(avgConfidence)}`}
-                  style={{ width: `${avgConfidence}%` }}
-                />
-              </div>
-              <span className="text-xs font-medium text-slate-600">{avgConfidence}%</span>
-            </div>
-          </div>
-        )}
-
-        <div className="space-y-3">
-          {def.subFields.map((subKey) => {
-            const val = confirmedFields[subKey]?.value ?? '';
-            return (
-              <div key={subKey}>
-                <label className={labelClass}>{subLabels[subKey] ?? subKey}</label>
-                <input
-                  type="text"
-                  className={inputClass}
-                  value={String(val)}
-                  onChange={(e) => updateFieldValue(subKey, e.target.value)}
-                  placeholder={subLabels[subKey]}
-                />
-              </div>
-            );
-          })}
-        </div>
-      </>
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Render: Step 4 — Review & Submit
-  // -----------------------------------------------------------------------
-
-  function renderReviewStep() {
-    return (
-      <div className="max-w-2xl mx-auto">
-        <h2 className="text-lg font-semibold text-slate-900 mb-2">Review &amp; Create Client</h2>
-        <p className="text-sm text-slate-500 mb-6">
-          Check the details below. Go back to edit any field, then create the client.
-        </p>
-
-        <div className="border border-slate-200 rounded-xl bg-white shadow-sm overflow-hidden">
-          <table className="w-full text-sm">
-            <tbody>
-              {FIELD_DEFS.map((def) => {
-                if (def.type === 'address') {
-                  const subLabels: Record<string, string> = {
-                    addressLine1: 'Address Line 1',
-                    addressLine2: 'Address Line 2',
-                    addressCity: 'City / Town',
-                    addressCounty: 'County',
-                    addressPostcode: 'Postcode',
-                  };
-                  return def.subFields.map((subKey) => {
-                    const field = confirmedFields[subKey];
-                    const display = field?.skipped
-                      ? '\u2014'
-                      : field?.value
-                      ? String(field.value)
-                      : '\u2014';
-                    return (
-                      <tr key={subKey} className="border-b border-slate-100 last:border-0">
-                        <td className="px-4 py-3 font-medium text-slate-600 w-1/3">
-                          {subLabels[subKey]}
-                        </td>
-                        <td className="px-4 py-3 text-slate-900">{display}</td>
-                        <td className="px-4 py-1 text-right">
-                          {field?.confirmed && (
-                            <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
-                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                              </svg>
-                              Confirmed
-                            </span>
-                          )}
-                          {field?.skipped && (
-                            <span className="text-xs text-slate-400">Skipped</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  });
-                }
-
-                const field = confirmedFields[def.key];
-                let display: string;
-                if (field?.skipped) {
-                  display = '\u2014';
-                } else if (def.type === 'tags' && Array.isArray(field?.value)) {
-                  display = (field.value as string[]).length > 0 ? (field.value as string[]).join(', ') : '\u2014';
-                } else if (def.type === 'currency' && field?.value) {
-                  display = `\u00A3${formatCurrency(field.value)}`;
-                } else {
-                  display = field?.value ? String(field.value) : '\u2014';
-                }
-
-                return (
-                  <tr key={def.key} className="border-b border-slate-100 last:border-0">
-                    <td className="px-4 py-3 font-medium text-slate-600 w-1/3">{def.label}</td>
-                    <td className="px-4 py-3 text-slate-900">{display}</td>
-                    <td className="px-4 py-1 text-right">
-                      {field?.confirmed && (
-                        <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                          </svg>
-                          Confirmed
-                        </span>
-                      )}
-                      {field?.skipped && (
-                        <span className="text-xs text-slate-400">Skipped</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="flex items-center justify-between mt-6">
-          <button
-            type="button"
-            onClick={() => {
-              setCurrentFieldIndex(0);
-              setStep('field-confirm');
-            }}
-            className="text-sm text-teal-600 hover:text-teal-700 font-medium"
-          >
-            <span className="inline-flex items-center gap-1">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-              </svg>
-              Go back and edit
-            </span>
-          </button>
-
-          <div className="flex items-center gap-3">
-            <button type="button" onClick={() => navigate('/clients')} className={btnSecondary}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={submitConfirmed}
-              disabled={isSubmitting || !confirmedFields['name']?.value}
-              className={btnPrimary}
-            >
-              {isSubmitting ? 'Creating...' : 'Create Client'}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Render: Manual entry form
-  // -----------------------------------------------------------------------
-
-  function renderManualForm() {
-    return (
-      <div className="max-w-3xl mx-auto">
-        <div className="flex items-center gap-2 mb-6">
-          <button
-            type="button"
-            onClick={() => setStep('input-method')}
-            className="text-sm text-teal-600 hover:text-teal-700 font-medium"
-          >
-            <span className="inline-flex items-center gap-1">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-              </svg>
-              Back to input options
-            </span>
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit(submitManual)} className="space-y-6">
-          {/* Name and Type */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label htmlFor="name" className={labelClass}>
-                Organisation name <span className="text-red-500">*</span>
-              </label>
-              <input
-                {...register('name')}
-                type="text"
-                id="name"
-                className={inputClass}
-                placeholder="e.g. Greenfield Community CIC"
-              />
-              {errors.name && <p className="mt-1 text-xs text-red-600">{errors.name.message}</p>}
-            </div>
-            <div>
-              <label htmlFor="type" className={labelClass}>
-                Organisation type
-              </label>
-              <select {...register('type')} id="type" className={selectClass}>
-                {ORG_TYPES.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <label className={labelCls}>Contact Email</label>
+            <input
+              type="email"
+              {...register('primaryContactEmail')}
+              className={`${inputBase} ${borderClass('primaryContactEmail')}`}
+            />
+            {errors.primaryContactEmail && (
+              <p className="text-red-500 text-xs mt-1">{errors.primaryContactEmail.message}</p>
+            )}
           </div>
 
-          {/* Contact */}
+          {/* Contact Phone */}
           <div>
-            <h2 className="text-sm font-semibold text-slate-800 mb-3 border-b border-slate-200 pb-2">
-              Primary Contact
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label htmlFor="primaryContactName" className={labelClass}>
-                  Name
-                </label>
-                <input
-                  {...register('primaryContactName')}
-                  type="text"
-                  id="primaryContactName"
-                  className={inputClass}
-                  placeholder="Full name"
-                />
-              </div>
-              <div>
-                <label htmlFor="primaryContactEmail" className={labelClass}>
-                  Email
-                </label>
-                <input
-                  {...register('primaryContactEmail')}
-                  type="email"
-                  id="primaryContactEmail"
-                  className={inputClass}
-                  placeholder="contact@example.com"
-                />
-                {errors.primaryContactEmail && (
-                  <p className="mt-1 text-xs text-red-600">{errors.primaryContactEmail.message}</p>
-                )}
-              </div>
-              <div>
-                <label htmlFor="primaryContactPhone" className={labelClass}>
-                  Phone
-                </label>
-                <input
-                  {...register('primaryContactPhone')}
-                  type="tel"
-                  id="primaryContactPhone"
-                  className={inputClass}
-                  placeholder="07xxx xxxxxx"
-                />
-              </div>
-              <div>
-                <label htmlFor="annualIncome" className={labelClass}>
-                  Annual income
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-                    {'\u00A3'}
-                  </span>
-                  <input
-                    {...register('annualIncome')}
-                    type="number"
-                    id="annualIncome"
-                    className={`${inputClass} pl-7`}
-                    placeholder="0"
-                    min="0"
-                    step="1"
-                  />
-                </div>
-                {errors.annualIncome && (
-                  <p className="mt-1 text-xs text-red-600">{errors.annualIncome.message}</p>
-                )}
-              </div>
+            <label className={labelCls}>Contact Phone</label>
+            <input
+              {...register('primaryContactPhone')}
+              className={`${inputBase} ${borderClass('primaryContactPhone')}`}
+            />
+          </div>
+
+          {/* Annual Income */}
+          <div>
+            <label className={labelCls}>Annual Income</label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6b7280] text-sm">
+                £
+              </span>
+              <input
+                type="number"
+                {...register('annualIncome')}
+                className={`${inputBase} ${borderClass('annualIncome')} pl-7`}
+                min="0"
+                step="1"
+              />
             </div>
           </div>
 
-          {/* Registration */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label htmlFor="registeredNumber" className={labelClass}>
-                Registered number
-              </label>
-              <input
-                {...register('registeredNumber')}
-                type="text"
-                id="registeredNumber"
-                className={inputClass}
-                placeholder="e.g. 12345678"
-              />
-            </div>
+          {/* Registered Number */}
+          <div>
+            <label className={labelCls}>Registered Number</label>
+            <input
+              {...register('registeredNumber')}
+              className={`${inputBase} ${borderClass('registeredNumber')}`}
+            />
           </div>
 
           {/* Address */}
           <div>
-            <h2 className="text-sm font-semibold text-slate-800 mb-3 border-b border-slate-200 pb-2">
-              Address
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="md:col-span-2">
-                <label htmlFor="addressLine1" className={labelClass}>
-                  Address line 1
-                </label>
-                <input
-                  {...register('addressLine1')}
-                  type="text"
-                  id="addressLine1"
-                  className={inputClass}
-                  placeholder="Street address"
-                />
-              </div>
-              <div className="md:col-span-2">
-                <label htmlFor="addressLine2" className={labelClass}>
-                  Address line 2
-                </label>
-                <input
-                  {...register('addressLine2')}
-                  type="text"
-                  id="addressLine2"
-                  className={inputClass}
-                  placeholder="Flat, suite, etc. (optional)"
-                />
-              </div>
-              <div>
-                <label htmlFor="addressCity" className={labelClass}>
-                  City / Town
-                </label>
-                <input
-                  {...register('addressCity')}
-                  type="text"
-                  id="addressCity"
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <label htmlFor="addressCounty" className={labelClass}>
-                  County
-                </label>
-                <input
-                  {...register('addressCounty')}
-                  type="text"
-                  id="addressCounty"
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <label htmlFor="addressPostcode" className={labelClass}>
-                  Postcode
-                </label>
-                <input
-                  {...register('addressPostcode')}
-                  type="text"
-                  id="addressPostcode"
-                  className={inputClass}
-                  placeholder="e.g. SW1A 1AA"
-                />
-              </div>
+            <label className={labelCls}>Address Line 1</label>
+            <input
+              {...register('addressLine1')}
+              className={`${inputBase} ${borderClass('addressLine1')}`}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Address Line 2</label>
+            <input
+              {...register('addressLine2')}
+              className={`${inputBase} ${borderClass('addressLine2')}`}
+            />
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className={labelCls}>City</label>
+              <input
+                {...register('addressCity')}
+                className={`${inputBase} ${borderClass('addressCity')}`}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>County</label>
+              <input
+                {...register('addressCounty')}
+                className={`${inputBase} ${borderClass('addressCounty')}`}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Postcode</label>
+              <input
+                {...register('addressPostcode')}
+                className={`${inputBase} ${borderClass('addressPostcode')}`}
+              />
             </div>
           </div>
 
-          {/* Policies */}
+          {/* Policies (tags) */}
           <div>
-            <label htmlFor="policiesHeld" className={labelClass}>
-              Policies held
-            </label>
-            <input
-              {...register('policiesHeld')}
-              type="text"
-              id="policiesHeld"
-              className={inputClass}
-              placeholder="Comma-separated, e.g. Safeguarding, Equal Opportunities, GDPR"
-            />
-            <p className="mt-1 text-xs text-slate-500">Separate multiple policies with commas.</p>
+            <label className={labelCls}>Policies</label>
+            <div
+              className={`flex flex-wrap items-center gap-1.5 min-h-[36px] px-2 py-1.5 border rounded-md transition-all duration-300 ${
+                filledFields.has('policiesHeld')
+                  ? 'border-[#16a34a] border-2 bg-green-50/40'
+                  : 'border-[#e5e7eb]'
+              }`}
+            >
+              {policies.map((p, i) => (
+                <span
+                  key={`${p}-${i}`}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-teal-50 text-teal-700 text-xs font-medium rounded"
+                >
+                  {p}
+                  <button
+                    type="button"
+                    onClick={() => removePolicy(i)}
+                    className="text-teal-400 hover:text-teal-600 ml-0.5"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              <input
+                type="text"
+                value={policyInput}
+                onChange={(e) => setPolicyInput(e.target.value)}
+                onKeyDown={handlePolicyKeyDown}
+                placeholder={policies.length === 0 ? 'Type and press Enter to add...' : '+ add'}
+                className="flex-1 min-w-[120px] text-[13px] text-[#111827] outline-none bg-transparent h-7"
+              />
+            </div>
           </div>
 
           {/* Notes */}
           <div>
-            <label htmlFor="notes" className={labelClass}>
-              Notes
-            </label>
+            <label className={labelCls}>Notes</label>
             <textarea
               {...register('notes')}
-              id="notes"
-              rows={4}
-              className={inputClass}
-              placeholder="Any additional notes about this client..."
+              rows={3}
+              className={`w-full px-3 py-2 border rounded-md text-[13px] text-[#111827] focus:outline-none focus:ring-2 focus:ring-[#2563eb] transition-all duration-300 resize-y ${borderClass('notes')}`}
             />
           </div>
 
           {/* Actions */}
-          <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-200">
-            <button type="button" onClick={() => navigate('/clients')} className={btnSecondary}>
+          <div className="flex items-center justify-between pt-4 border-t border-gray-200">
+            <Link
+              to="/clients"
+              className="text-sm text-[#6b7280] hover:text-[#111827] transition-colors"
+            >
               Cancel
-            </button>
-            <button type="submit" disabled={isSubmitting} className={btnPrimary}>
+            </Link>
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="px-5 py-2 bg-[#2563eb] hover:bg-[#1d4ed8] disabled:opacity-50 text-white text-sm font-medium rounded-md transition-colors"
+            >
               {isSubmitting ? 'Creating...' : 'Create Client'}
             </button>
           </div>
         </form>
-      </div>
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Main render
-  // -----------------------------------------------------------------------
-
-  function renderContent() {
-    // Voice recording is shown as an overlay within the input-method step
-    if (inputMethod === 'voice' && step === 'input-method') {
-      return renderVoiceRecording();
-    }
-
-    switch (step) {
-      case 'input-method':
-        return renderInputMethodStep();
-      case 'processing':
-        return renderProcessingStep();
-      case 'field-confirm':
-        return renderFieldConfirmation();
-      case 'review':
-        return renderReviewStep();
-      case 'manual':
-        return renderManualForm();
-      default:
-        return null;
-    }
-  }
-
-  return (
-    <div className="flex flex-col h-full">
-      {/* Page header */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-slate-200 bg-white">
-        <div className="flex items-center gap-2 text-sm">
-          <Link to="/clients" className="text-slate-500 hover:text-teal-600 transition-colors">
-            Clients
-          </Link>
-          <span className="text-slate-300">/</span>
-          <h1 className="font-semibold text-slate-900">Add New Client</h1>
-        </div>
-      </div>
-
-      {/* Body */}
-      <div className="flex-1 overflow-auto">
-        <div className="px-4 py-8">
-          <StepIndicator currentStep={step} />
-          {renderContent()}
-        </div>
       </div>
     </div>
   );
