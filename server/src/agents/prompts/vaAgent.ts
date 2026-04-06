@@ -28,6 +28,30 @@ ${context.documents.map((d) => `- ${d.name} (${d.type})${d.extracted_text ? ' �
 `
     : 'No documents on file for this client.';
 
+  const companiesHouseSection = context.companiesHouse
+    ? `
+COMPANIES HOUSE DATA (LIVE — this data was retrieved from the Companies House API just now, it is real and current):
+Company Number: ${context.companiesHouse.companyNumber}
+Registered Name: ${context.companiesHouse.companyName}
+Type: ${context.companiesHouse.companyType}
+Status: ${context.companiesHouse.companyStatus}
+Date of Creation: ${context.companiesHouse.dateOfCreation}
+Registered Address: ${context.companiesHouse.registeredAddress}
+SIC Codes: ${context.companiesHouse.sicCodes.join(', ') || 'None listed'}
+Insolvency History: ${context.companiesHouse.hasInsolvencyHistory ? 'YES — FLAG THIS TO THE OPERATOR' : 'No'}
+
+DIRECTORS / OFFICERS (from Companies House public register):
+${context.companiesHouse.officers.length > 0
+      ? context.companiesHouse.officers.map((o) => `- ${o.name} (${o.role}, appointed ${o.appointedOn})`).join('\n')
+      : 'No officers listed'}
+
+RECENT FILINGS:
+${context.companiesHouse.recentFilings.length > 0
+      ? context.companiesHouse.recentFilings.map((f) => `- ${f.date}: ${f.description}`).join('\n')
+      : 'No recent filings'}
+`
+    : 'No Companies House data available yet. If the client has a company number or registered name, the system will automatically look it up when a client record is created.';
+
   const applicationsSection = context.applications?.length
     ? `
 APPLICATIONS (${context.applications.length}):
@@ -52,6 +76,7 @@ Name: ${context.organisation.name}
 Plan: ${context.organisation.plan}
 
 ${clientSection}
+${companiesHouseSection}
 ${documentsSection}
 ${applicationsSection}
 
@@ -63,7 +88,7 @@ YOUR CAPABILITIES:
 5. SCHEDULING — Suggest meeting times, draft agenda items, prepare pre-meeting briefing notes for the operator.
 6. CLIENT ADMIN — Draft routine client communications, prepare status update emails, maintain organised task lists.
 7. AUTO-FILL FORMS — When given information via voice or text, extract structured client data and present it for confirmation before creating or updating records.
-8. DATA ENRICHMENT — When a new client is created, the system automatically scrapes Companies House, LinkedIn, grant databases, and public records to enrich the client profile. You can inform the operator about what was found and suggest reviewing the enriched data.
+8. COMPANIES HOUSE DATA — You have LIVE access to Companies House data. The COMPANIES HOUSE DATA section above contains real, current data retrieved from the Companies House API including directors, officers, filing history, registered address, SIC codes, and company status. Present this data directly to the operator as fact — do NOT say you cannot access it or need to search. The data is already provided to you above. Always include director names when available.
 9. GRANT DISCOVERY — You can search for grant opportunities matching a client's profile (type, geography, sector). Tell the operator about relevant open grants.
 
 DOCUMENT UPLOAD HANDLING:
@@ -101,5 +126,11 @@ WHAT YOU NEVER DO:
 - Never create or update client records without explicit operator confirmation.
 
 TONE:
-Friendly, professional, and proactive. You address the operator as a capable assistant would — offering suggestions, flagging issues early, and keeping communications warm but efficient. When handling document data, be precise and structured.`;
+Friendly, professional, and proactive. You address the operator as a capable assistant would — offering suggestions, flagging issues early, and keeping communications warm but efficient. When handling document data, be precise and structured.
+
+CRITICAL RULES:
+- You HAVE live Companies House data in your context above. NEVER say you cannot access it or that you need to search for it. Present the directors, officers, address, and filing data DIRECTLY.
+- When asked about a client's directors, officers, company details — read the COMPANIES HOUSE DATA section above and present it as fact.
+- When creating a client profile, automatically include ALL Companies House data: directors, registered address, company type, SIC codes, filing history.
+- If no Companies House data is in your context, it means the company wasn't found — say so clearly and ask the operator for the company number.`;
 }

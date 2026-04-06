@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase.js';
 import type { AgentContext } from '../../../shared/types/agents.js';
+import { searchCompaniesHouse, getCompanyProfile, getCompanyOfficers, getCompanyFilingHistory } from './companiesHouse.js';
 
 /**
  * Assembles the context pack for an agent conversation.
@@ -39,7 +40,7 @@ export async function buildContext(
       supabase
         .from('clients')
         .select(
-          'id, name, type, stage, status, primary_contact_name, annual_income, policies_held, existing_grants'
+          'id, name, type, stage, status, primary_contact_name, annual_income, policies_held, existing_grants, registered_number, address'
         )
         .eq('id', clientId)
         .eq('organisation_id', orgId)
@@ -74,7 +75,70 @@ export async function buildContext(
         annual_income: clientResult.data.annual_income,
         policies_held: clientResult.data.policies_held,
         existing_grants: clientResult.data.existing_grants ?? [],
+        registered_number: clientResult.data.registered_number,
+        address: clientResult.data.address,
       };
+
+      // Fetch Companies House data if registered number available
+      const regNum = clientResult.data.registered_number as string | null;
+      if (regNum) {
+        try {
+          const [profile, officers, filings] = await Promise.all([
+            getCompanyProfile(regNum).catch(() => null),
+            getCompanyOfficers(regNum).catch(() => []),
+            getCompanyFilingHistory(regNum).catch(() => []),
+          ]);
+
+          if (profile) {
+            const addr = profile.registeredAddress;
+            context.companiesHouse = {
+              companyNumber: profile.companyNumber,
+              companyName: profile.companyName,
+              companyType: profile.companyType,
+              companyStatus: profile.companyStatus,
+              dateOfCreation: profile.dateOfCreation,
+              registeredAddress: [addr.line1, addr.line2, addr.locality, addr.region, addr.postalCode].filter(Boolean).join(', '),
+              sicCodes: profile.sicCodes ?? [],
+              officers: officers.map((o) => ({ name: o.name, role: o.role, appointedOn: o.appointedOn })),
+              recentFilings: filings.slice(0, 5).map((f) => ({ date: f.date, description: f.description })),
+              hasInsolvencyHistory: profile.hasInsolvencyHistory,
+            };
+          }
+        } catch {
+          // Companies House unavailable — continue without it
+        }
+      } else {
+        // Try searching by company name
+        try {
+          const searchResults = await searchCompaniesHouse(clientResult.data.name);
+          if (searchResults.length > 0) {
+            const best = searchResults[0]!;
+            const [profile, officers, filings] = await Promise.all([
+              getCompanyProfile(best.companyNumber).catch(() => null),
+              getCompanyOfficers(best.companyNumber).catch(() => []),
+              getCompanyFilingHistory(best.companyNumber).catch(() => []),
+            ]);
+
+            if (profile) {
+              const addr = profile.registeredAddress;
+              context.companiesHouse = {
+                companyNumber: profile.companyNumber,
+                companyName: profile.companyName,
+                companyType: profile.companyType,
+                companyStatus: profile.companyStatus,
+                dateOfCreation: profile.dateOfCreation,
+                registeredAddress: [addr.line1, addr.line2, addr.locality, addr.region, addr.postalCode].filter(Boolean).join(', '),
+                sicCodes: profile.sicCodes ?? [],
+                officers: officers.map((o) => ({ name: o.name, role: o.role, appointedOn: o.appointedOn })),
+                recentFilings: filings.slice(0, 5).map((f) => ({ date: f.date, description: f.description })),
+                hasInsolvencyHistory: profile.hasInsolvencyHistory,
+              };
+            }
+          }
+        } catch {
+          // Search failed — continue without it
+        }
+      }
     }
 
     if (docsResult.data) {

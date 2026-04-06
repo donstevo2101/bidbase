@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import { api, API_BASE } from '../../lib/api';
 import { useSessionStore } from '../../stores/session';
 import type { Client, Application, AgentType } from '@shared/types/database';
@@ -26,6 +27,8 @@ interface ChatMessage {
   content: string;
   agentType: AgentType;
   timestamp: Date;
+  action?: 'client_extracted' | 'client_created' | 'enrichment_complete';
+  actionData?: Record<string, unknown>;
 }
 
 interface AgentOption {
@@ -221,6 +224,20 @@ export default function AgentWorkspacePage() {
   const [contextPanelOpen, setContextPanelOpen] = useState(true);
   const [isListening, setIsListening] = useState(false);
 
+  // Client action state
+  const [pendingClientData, setPendingClientData] = useState<Record<string, unknown> | null>(null);
+  const [isCreatingClient, setIsCreatingClient] = useState(false);
+  const [showQuickAddForm, setShowQuickAddForm] = useState(false);
+  const [quickAddData, setQuickAddData] = useState({
+    name: '',
+    type: '',
+    primaryContactName: '',
+    primaryContactEmail: '',
+    primaryContactPhone: '',
+    annualIncome: '',
+    registeredNumber: '',
+  });
+
   // File upload state
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -272,15 +289,59 @@ export default function AgentWorkspacePage() {
       setIsListening(false);
     };
 
-    recognition.onend = () => {
+    recognition.onend = async () => {
       setIsListening(false);
+      // Auto-parse voice transcript for client data when VA is selected
+      if (selectedAgent.type === 'va' && finalTranscript.trim().length > 20) {
+        try {
+          const parseResult = await api.post<Record<string, unknown>>('/client-parser/parse-voice', { transcript: finalTranscript.trim() });
+          if (parseResult.success && parseResult.data && parseResult.data.name) {
+            setPendingClientData(parseResult.data);
+            const extracted = parseResult.data;
+            const lines: string[] = ['I heard your client details. Here\'s what I extracted:\n'];
+            if (extracted.name) lines.push(`Organisation: ${String(extracted.name)}`);
+            if (extracted.type) lines.push(`Type: ${String(extracted.type)}`);
+            if (extracted.primaryContactName) lines.push(`Contact: ${String(extracted.primaryContactName)}`);
+            if (extracted.primaryContactEmail) lines.push(`Email: ${String(extracted.primaryContactEmail)}`);
+            if (extracted.primaryContactPhone) lines.push(`Phone: ${String(extracted.primaryContactPhone)}`);
+
+            const userMsg: ChatMessage = {
+              id: generateId(),
+              role: 'user',
+              content: finalTranscript.trim(),
+              agentType: selectedAgent.type,
+              timestamp: new Date(),
+            };
+            const assistantMsg: ChatMessage = {
+              id: generateId(),
+              role: 'assistant',
+              content: lines.join('\n'),
+              agentType: selectedAgent.type,
+              timestamp: new Date(),
+            };
+            const actionMsg: ChatMessage = {
+              id: generateId(),
+              role: 'assistant',
+              content: 'Would you like me to create a client record with this information?',
+              agentType: selectedAgent.type,
+              timestamp: new Date(),
+              action: 'client_extracted',
+              actionData: parseResult.data,
+            };
+            setMessages(prev => [...prev, userMsg, assistantMsg, actionMsg]);
+            setInputValue('');
+          }
+        } catch {
+          // Voice parsing failed silently — user can still send as normal message
+        }
+      }
     };
 
     recognitionRef.current = recognition;
     finalTranscript = inputValue;
     recognition.start();
     setIsListening(true);
-  }, [isListening, inputValue]);
+  }, [isListening, inputValue, selectedAgent.type]);
 
   // -----------------------------------------------------------------------
   // Data fetching
@@ -346,6 +407,8 @@ export default function AgentWorkspacePage() {
     setError(null);
     setIsStreaming(false);
     setActiveConversationId(null);
+    setPendingClientData(null);
+    setShowQuickAddForm(false);
   }
 
   // -----------------------------------------------------------------------
@@ -360,6 +423,8 @@ export default function AgentWorkspacePage() {
     setError(null);
     setIsStreaming(false);
     setActiveConversationId(null);
+    setPendingClientData(null);
+    setShowQuickAddForm(false);
   }
 
   // -----------------------------------------------------------------------
@@ -588,10 +653,55 @@ export default function AgentWorkspacePage() {
   );
 
   // -----------------------------------------------------------------------
+  // Create client from chat action
+  // -----------------------------------------------------------------------
+
+  const createClientFromChat = useCallback(async (dataOverride?: Record<string, unknown>) => {
+    const data = dataOverride ?? pendingClientData;
+    if (!data) return;
+    setIsCreatingClient(true);
+
+    try {
+      const result = await api.post<{ id: string; name: string }>('/client-parser/confirm', data);
+
+      if (!result.success) throw new Error(result.error.message);
+
+      const successMsg: ChatMessage = {
+        id: generateId(),
+        role: 'assistant',
+        content: `Client "${result.data.name}" has been created successfully. The system is now enriching their profile with Companies House, LinkedIn, and grant data.`,
+        agentType: selectedAgent.type,
+        timestamp: new Date(),
+        action: 'client_created',
+        actionData: { clientId: result.data.id, clientName: result.data.name },
+      };
+      setMessages(prev => [...prev, successMsg]);
+      setPendingClientData(null);
+      setShowQuickAddForm(false);
+
+      // Auto-select the new client in the context panel
+      setSelectedClientId(result.data.id);
+
+      toast.success(`Client "${result.data.name}" created`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create client');
+    } finally {
+      setIsCreatingClient(false);
+    }
+  }, [pendingClientData, selectedAgent.type]);
+
+  // -----------------------------------------------------------------------
   // Document upload for agent chat
   // -----------------------------------------------------------------------
 
   const handleAgentFileUpload = useCallback(async (file: File) => {
+    // Auto-switch to VA agent when uploading a document from any agent
+    const vaAgent = AGENTS.find(a => a.type === 'va');
+    if (vaAgent && selectedAgent.type !== 'va') {
+      setSelectedAgent(vaAgent);
+    }
+    const agentType = 'va' as AgentType;
+
     setIsUploading(true);
     setUploadedFileName(file.name);
 
@@ -633,6 +743,11 @@ export default function AgentWorkspacePage() {
       }
 
       const extracted = result.data;
+
+      // Store the extracted data for the action system
+      setPendingClientData(extracted as Record<string, unknown>);
+
+      // Build summary lines
       const lines: string[] = [`I've uploaded and analysed "${file.name}". Here's what I extracted:\n`];
       if (extracted.name) lines.push(`Organisation: ${extracted.name}`);
       if (extracted.type) lines.push(`Type: ${extracted.type}`);
@@ -646,9 +761,37 @@ export default function AgentWorkspacePage() {
         if (addr) lines.push(`Address: ${addr}`);
       }
       if (extracted.policiesHeld?.length) lines.push(`Policies: ${extracted.policiesHeld.join(', ')}`);
-      lines.push('\nWould you like me to create a client record with this information?');
 
-      await sendMessage(lines.join('\n'));
+      // Add user message showing the upload
+      const userMsg: ChatMessage = {
+        id: generateId(),
+        role: 'user',
+        content: `I've uploaded "${file.name}"`,
+        agentType: agentType,
+        timestamp: new Date(),
+      };
+
+      // Add assistant message with extracted data summary
+      const assistantMsg: ChatMessage = {
+        id: generateId(),
+        role: 'assistant',
+        content: lines.join('\n'),
+        agentType: agentType,
+        timestamp: new Date(),
+      };
+
+      // Add action message with interactive card
+      const actionMsg: ChatMessage = {
+        id: generateId(),
+        role: 'assistant',
+        content: 'Would you like me to create a client record with this information?',
+        agentType: agentType,
+        timestamp: new Date(),
+        action: 'client_extracted',
+        actionData: extracted as Record<string, unknown>,
+      };
+
+      setMessages(prev => [...prev, userMsg, assistantMsg, actionMsg]);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : 'Failed to process document';
       setError(`Document upload failed: ${errMsg}`);
@@ -657,7 +800,7 @@ export default function AgentWorkspacePage() {
       setUploadedFileName(null);
       if (fileUploadRef.current) fileUploadRef.current.value = '';
     }
-  }, [sendMessage]);
+  }, [selectedAgent.type]);
 
   // -----------------------------------------------------------------------
   // Keyboard handling
@@ -963,6 +1106,50 @@ export default function AgentWorkspacePage() {
                     </button>
                   ))}
                 </div>
+
+                {/* VA-specific quick action buttons */}
+                {selectedAgent.type === 'va' && (
+                  <div className="mt-4 pt-4 border-t border-slate-700/40">
+                    <p className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-2">Quick Actions</p>
+                    <div className="flex flex-wrap gap-2 justify-center">
+                      <button
+                        onClick={() => fileUploadRef.current?.click()}
+                        disabled={isStreaming || isUploading}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-teal-700/40 bg-teal-900/20 hover:bg-teal-900/40 text-xs text-teal-300 hover:text-teal-200 transition-all disabled:opacity-50"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                        </svg>
+                        Upload client document
+                      </button>
+                      {speechSupported && (
+                        <button
+                          onClick={toggleListening}
+                          disabled={isStreaming}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-teal-700/40 bg-teal-900/20 hover:bg-teal-900/40 text-xs text-teal-300 hover:text-teal-200 transition-all disabled:opacity-50"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+                          </svg>
+                          Dictate client details
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          setShowQuickAddForm(true);
+                          setQuickAddData({ name: '', type: '', primaryContactName: '', primaryContactEmail: '', primaryContactPhone: '', annualIncome: '', registeredNumber: '' });
+                        }}
+                        disabled={isStreaming}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-teal-700/40 bg-teal-900/20 hover:bg-teal-900/40 text-xs text-teal-300 hover:text-teal-200 transition-all disabled:opacity-50"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                        </svg>
+                        Quick add client
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1009,6 +1196,72 @@ export default function AgentWorkspacePage() {
                       </span>
                     )}
                   </div>
+
+                  {/* Action card: Extracted client data with Create/Cancel buttons */}
+                  {msg.action === 'client_extracted' && msg.actionData && (
+                    <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 mt-2">
+                      <h4 className="text-xs font-semibold text-teal-400 uppercase tracking-wider mb-3">
+                        Extracted Client Data
+                      </h4>
+                      <div className="grid grid-cols-2 gap-2 text-xs mb-4">
+                        {Object.entries(msg.actionData).filter(([k]) => !['confidence', 'rawExtract'].includes(k)).map(([key, value]) => (
+                          <div key={key} className="flex justify-between">
+                            <span className="text-slate-400 capitalize">{key.replace(/([A-Z])/g, ' $1')}</span>
+                            <span className="text-white font-medium">{typeof value === 'object' ? JSON.stringify(value) : String(value ?? '')}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => createClientFromChat()}
+                          disabled={isCreatingClient}
+                          className="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white text-xs font-medium rounded-lg disabled:opacity-50 flex items-center gap-2 transition-colors"
+                        >
+                          {isCreatingClient ? (
+                            <>
+                              <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                              </svg>
+                              Creating...
+                            </>
+                          ) : (
+                            'Create Client'
+                          )}
+                        </button>
+                        <button
+                          onClick={() => setPendingClientData(null)}
+                          className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-medium rounded-lg transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action card: Client created success */}
+                  {msg.action === 'client_created' && msg.actionData && (
+                    <div className="bg-emerald-900/30 border border-emerald-700/50 rounded-xl p-4 mt-2">
+                      <div className="flex items-center gap-2 mb-2">
+                        <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <span className="text-sm font-semibold text-emerald-300">Client Created Successfully</span>
+                      </div>
+                      <p className="text-xs text-slate-300 mb-3">
+                        The system is enriching this client with Companies House, LinkedIn, and grant data in the background.
+                      </p>
+                      <a
+                        href={`/clients/${String(msg.actionData.clientId)}`}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-lg transition-colors"
+                      >
+                        View Client Profile
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                        </svg>
+                      </a>
+                    </div>
+                  )}
                 </div>
 
                 {/* User avatar */}
@@ -1047,6 +1300,113 @@ export default function AgentWorkspacePage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   <span>{error}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Inline quick-add client form */}
+          {showQuickAddForm && selectedAgent.type === 'va' && (
+            <div className="flex mb-4 justify-start">
+              <div className="w-7 h-7 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-sm flex-shrink-0 mr-2.5 mt-0.5">
+                {selectedAgent.icon}
+              </div>
+              <div className="max-w-[70%]">
+                <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
+                  <h4 className="text-xs font-semibold text-teal-400 uppercase tracking-wider mb-3">Quick Add Client</h4>
+                  <div className="space-y-2">
+                    <input
+                      placeholder="Organisation name *"
+                      value={quickAddData.name}
+                      onChange={(e) => setQuickAddData(prev => ({ ...prev, name: e.target.value }))}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
+                    />
+                    <select
+                      value={quickAddData.type}
+                      onChange={(e) => setQuickAddData(prev => ({ ...prev, type: e.target.value }))}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
+                    >
+                      <option value="">Type...</option>
+                      <option value="CIC">CIC</option>
+                      <option value="charity">Charity</option>
+                      <option value="social_enterprise">Social Enterprise</option>
+                      <option value="unincorporated">Unincorporated</option>
+                      <option value="other">Other</option>
+                    </select>
+                    <input
+                      placeholder="Contact name"
+                      value={quickAddData.primaryContactName}
+                      onChange={(e) => setQuickAddData(prev => ({ ...prev, primaryContactName: e.target.value }))}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
+                    />
+                    <input
+                      placeholder="Contact email"
+                      type="email"
+                      value={quickAddData.primaryContactEmail}
+                      onChange={(e) => setQuickAddData(prev => ({ ...prev, primaryContactEmail: e.target.value }))}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
+                    />
+                    <input
+                      placeholder="Contact phone"
+                      type="tel"
+                      value={quickAddData.primaryContactPhone}
+                      onChange={(e) => setQuickAddData(prev => ({ ...prev, primaryContactPhone: e.target.value }))}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
+                    />
+                    <input
+                      placeholder="Annual income"
+                      type="number"
+                      value={quickAddData.annualIncome}
+                      onChange={(e) => setQuickAddData(prev => ({ ...prev, annualIncome: e.target.value }))}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
+                    />
+                    <input
+                      placeholder="Registered number"
+                      value={quickAddData.registeredNumber}
+                      onChange={(e) => setQuickAddData(prev => ({ ...prev, registeredNumber: e.target.value }))}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-teal-500 focus:border-teal-500"
+                    />
+                    <div className="flex gap-2 mt-3">
+                      <button
+                        onClick={() => {
+                          if (!quickAddData.name.trim()) {
+                            toast.error('Organisation name is required');
+                            return;
+                          }
+                          const payload: Record<string, unknown> = {
+                            name: quickAddData.name.trim(),
+                          };
+                          if (quickAddData.type) payload.type = quickAddData.type;
+                          if (quickAddData.primaryContactName) payload.primaryContactName = quickAddData.primaryContactName;
+                          if (quickAddData.primaryContactEmail) payload.primaryContactEmail = quickAddData.primaryContactEmail;
+                          if (quickAddData.primaryContactPhone) payload.primaryContactPhone = quickAddData.primaryContactPhone;
+                          if (quickAddData.annualIncome) payload.annualIncome = Number(quickAddData.annualIncome);
+                          if (quickAddData.registeredNumber) payload.registeredNumber = quickAddData.registeredNumber;
+                          createClientFromChat(payload);
+                        }}
+                        disabled={isCreatingClient || !quickAddData.name.trim()}
+                        className="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white text-xs font-medium rounded-lg disabled:opacity-50 flex items-center gap-2 transition-colors"
+                      >
+                        {isCreatingClient ? (
+                          <>
+                            <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                            </svg>
+                            Creating...
+                          </>
+                        ) : (
+                          'Create Client'
+                        )}
+                      </button>
+                      <button
+                        onClick={() => setShowQuickAddForm(false)}
+                        className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-medium rounded-lg transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

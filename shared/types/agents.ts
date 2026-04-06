@@ -24,6 +24,20 @@ export interface AgentContext {
     annual_income: number | null;
     policies_held: string[] | null;
     existing_grants: unknown[];
+    registered_number: string | null;
+    address: unknown;
+  };
+  companiesHouse?: {
+    companyNumber: string;
+    companyName: string;
+    companyType: string;
+    companyStatus: string;
+    dateOfCreation: string;
+    registeredAddress: string;
+    sicCodes: string[];
+    officers: Array<{ name: string; role: string; appointedOn: string }>;
+    recentFilings: Array<{ date: string; description: string }>;
+    hasInsolvencyHistory: boolean;
   };
   documents?: Array<{
     id: string;
