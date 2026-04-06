@@ -156,10 +156,13 @@ clientsRouter.post(
       return;
     }
 
-    // Update plan usage counter
-    await supabase.rpc('increment_usage', { org: req.user.org_id, field: 'active_clients' }).catch(() => {
-      // Non-critical — usage counter will reconcile on next sync
-    });
+    // Plan usage counter — non-critical, skip if fails
+    try {
+      const { data: usage } = await supabase.from('plan_usage').select('active_clients').eq('organisation_id', req.user.org_id).single();
+      if (usage) {
+        await supabase.from('plan_usage').update({ active_clients: (usage.active_clients ?? 0) + 1 }).eq('organisation_id', req.user.org_id);
+      }
+    } catch { /* non-critical */ }
 
     // Log activity
     await supabase.from('activity_log').insert({

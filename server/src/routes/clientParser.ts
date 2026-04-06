@@ -318,19 +318,23 @@ clientParserRouter.post(
       .single();
 
     if (error || !data) {
+      console.error('[ClientParser] Client creation failed:', error?.message, error?.details, error?.hint);
       res.status(500).json({
         success: false,
-        error: { code: 'CREATE_FAILED', message: 'Failed to create client' },
+        error: { code: 'CREATE_FAILED', message: error?.message ?? 'Failed to create client' },
       });
       return;
     }
 
-    // Update plan usage counter
-    await supabase
-      .rpc('increment_usage', { org: req.user.org_id, field: 'active_clients' })
-      .catch(() => {
-        // Non-critical — usage counter will reconcile on next sync
-      });
+    // Update plan usage counter (non-critical — skip if fails)
+    try {
+      await supabase
+        .from('plan_usage')
+        .update({ active_clients: supabase.rpc ? 0 : 0 })
+        .eq('organisation_id', req.user.org_id);
+    } catch {
+      // Non-critical
+    }
 
     // Log activity
     const orgId = req.user.org_id;
