@@ -4,6 +4,7 @@
  */
 
 import { fetchPage, extractText, searchWeb } from '../lib/scraper.js';
+import { scrapeUrl, searchGoogle, isApifyAvailable } from '../lib/apify.js';
 
 // ---- Types ----
 
@@ -34,7 +35,7 @@ export async function scrapeGrantPortals(): Promise<GrantOpportunity[]> {
     scrapeGovUkGrants(now),
     scrapeGrantNav(now),
     scrapeCharityExcellence(now),
-    scrapeDuckDuckGoGrants(now),
+    scrapeWebSearchGrants(now),
   ]);
 
   for (const result of results) {
@@ -119,33 +120,34 @@ async function scrapeNationalLottery(now: string): Promise<GrantOpportunity[]> {
   const opportunities: GrantOpportunity[] = [];
 
   try {
-    const html = await fetchPage('https://www.tnlcommunityfund.org.uk/funding');
-    const text = await extractText(html);
+    // Use Apify for JS-rendered content if available
+    let text: string;
+    if (isApifyAvailable()) {
+      const result = await scrapeUrl('https://www.tnlcommunityfund.org.uk/funding/programmes');
+      text = result.text;
+    } else {
+      const html = await fetchPage('https://www.tnlcommunityfund.org.uk/funding/programmes');
+      text = await extractText(html);
+    }
 
-    // Parse funding programmes from the page text
     const sections = text.split(/\n\n+/);
 
     for (const section of sections) {
-      // Look for sections that describe funding programmes
-      if (section.length < 30) continue;
+      if (section.length < 40) continue;
 
       const titleMatch = section.match(/^([A-Z][^\n]{10,80})/);
       if (!titleMatch) continue;
 
       const title = titleMatch[1].trim();
-
-      // Skip navigation/footer items
-      if (title.match(/^(Menu|Home|About|Contact|Cookie|Privacy|Footer)/i)) continue;
+      if (title.match(/^(Menu|Home|About|Contact|Cookie|Privacy|Footer|Skip|Search|Sign|Log|Back|Close|Subscribe|Newsletter)/i)) continue;
 
       const amountMatch = section.match(/[£][\d,]+(?:\s*(?:to|[-–])\s*[£]?[\d,]+)?/);
-      const deadlineMatch = section.match(
-        /(?:deadline|closes?|closing date)[:\s]*([^\n.]+)/i
-      );
+      const deadlineMatch = section.match(/(?:deadline|closes?|closing date)[:\s]*([^\n.]+)/i);
 
       opportunities.push({
         title,
         funder: 'The National Lottery Community Fund',
-        url: 'https://www.tnlcommunityfund.org.uk/funding',
+        url: 'https://www.tnlcommunityfund.org.uk/funding/programmes',
         amount: amountMatch ? amountMatch[0] : undefined,
         deadline: deadlineMatch ? deadlineMatch[1].trim() : undefined,
         description: section.slice(0, 300).trim(),
@@ -321,26 +323,28 @@ async function scrapeCharityExcellence(now: string): Promise<GrantOpportunity[]>
   return opportunities;
 }
 
-async function scrapeDuckDuckGoGrants(now: string): Promise<GrantOpportunity[]> {
+async function scrapeWebSearchGrants(now: string): Promise<GrantOpportunity[]> {
   const opportunities: GrantOpportunity[] = [];
 
   try {
-    const results = await searchWeb(
-      '"grant funding" "now open" UK CIC OR charity OR "social enterprise" 2026'
-    );
+    // Use Apify Google Search if available, otherwise DuckDuckGo
+    const query = '"grant funding" "now open" UK CIC OR charity OR "social enterprise" 2026';
+    const results = isApifyAvailable()
+      ? await searchGoogle(query, 15)
+      : await searchWeb(query);
 
-    for (const result of results.slice(0, 10)) {
+    for (const result of results.slice(0, 15)) {
       opportunities.push({
         title: result.title,
         funder: extractFunderFromTitle(result.title),
         url: result.url,
         description: result.snippet,
-        source: 'duckduckgo_search',
+        source: isApifyAvailable() ? 'google_search' : 'duckduckgo_search',
         scrapedAt: now,
       });
     }
   } catch (err) {
-    console.error('[GrantScraper] DuckDuckGo grants search failed:', err instanceof Error ? err.message : err);
+    console.error('[GrantScraper] Web search grants failed:', err instanceof Error ? err.message : err);
   }
 
   return opportunities;

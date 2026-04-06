@@ -11,6 +11,7 @@ import {
   getCompanyFilingHistory,
 } from './companiesHouse.js';
 import { fetchPage, extractText, searchWeb } from '../lib/scraper.js';
+import { searchGoogle, scrapeLinkedIn, isApifyAvailable } from '../lib/apify.js';
 
 // ---- Types ----
 
@@ -117,18 +118,29 @@ export async function enrichClientData(
   const searchName = enriched.companyName || clientName;
 
   try {
-    const [linkedinResults, charityResults, websiteResults] = await Promise.all([
-      searchWeb(`"${searchName}" site:linkedin.com`).catch(() => []),
-      searchWeb(`"${searchName}" charity commission`).catch(() => []),
-      searchWeb(`"${searchName}" official website UK`).catch(() => []),
+    // Use Apify for better results when available
+    const searchFn = isApifyAvailable() ? searchGoogle : searchWeb;
+
+    const [linkedinResults, charityResults, websiteResults, linkedinProfile] = await Promise.all([
+      searchFn(`"${searchName}" site:linkedin.com`).catch(() => []),
+      searchFn(`"${searchName}" charity commission UK`).catch(() => []),
+      searchFn(`"${searchName}" official website UK`).catch(() => []),
+      isApifyAvailable() ? scrapeLinkedIn(searchName).catch(() => null) : Promise.resolve(null),
     ]);
 
-    // LinkedIn
-    const linkedinHit = linkedinResults.find((r) => r.url.includes('linkedin.com/company'));
-    if (linkedinHit) {
-      enriched.linkedinUrl = linkedinHit.url;
-      enriched.linkedinSummary = linkedinHit.snippet;
-      sources.push('linkedin');
+    // LinkedIn — prefer Apify direct scrape, fall back to search
+    if (linkedinProfile) {
+      enriched.linkedinUrl = linkedinProfile.url;
+      enriched.linkedinSummary = `${linkedinProfile.description} | Industry: ${linkedinProfile.industry} | Employees: ${linkedinProfile.employeeCount}`;
+      if (linkedinProfile.website) enriched.websiteUrl = linkedinProfile.website;
+      sources.push('linkedin_apify');
+    } else {
+      const linkedinHit = linkedinResults.find((r) => r.url.includes('linkedin.com/company'));
+      if (linkedinHit) {
+        enriched.linkedinUrl = linkedinHit.url;
+        enriched.linkedinSummary = linkedinHit.snippet;
+        sources.push('linkedin');
+      }
     }
 
     // Charity Commission
