@@ -10,6 +10,7 @@ import type { ParsedClientData } from '../agents/clientParser.js';
 import type { Request, Response, NextFunction } from 'express';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
+import { enrichClientData } from '../agents/dataEnrichment.js';
 
 export const clientParserRouter = Router();
 
@@ -332,14 +333,39 @@ clientParserRouter.post(
       });
 
     // Log activity
+    const orgId = req.user.org_id;
     await supabase.from('activity_log').insert({
-      organisation_id: req.user.org_id,
+      organisation_id: orgId,
       client_id: data.id,
       actor_id: req.user.id,
       actor_type: 'user',
       action: 'client_created',
       details: { name: body.name, stage: 'A', source: 'client_parser' },
     });
+
+    // Trigger background enrichment — don't await, let it run async
+    enrichClientData(body.name, body.registeredNumber).then(async (enriched) => {
+      // Update client record with enriched data
+      const updateData: Record<string, unknown> = {};
+      if (enriched.companyNumber && !body.registeredNumber) updateData['registered_number'] = enriched.companyNumber;
+      if (enriched.registeredAddress) updateData['address'] = enriched.registeredAddress;
+      if (enriched.companyType) {
+        const typeMap: Record<string, string> = { 'community-interest-company': 'CIC', 'registered-charity': 'charity' };
+        const mappedType = typeMap[enriched.companyType];
+        if (mappedType && !body.type) updateData['type'] = mappedType;
+      }
+      if (enriched.previousGrants?.length) {
+        updateData['existing_grants'] = enriched.previousGrants.map(g => ({ funder: g.funder, amount: g.amount, open_until: g.date }));
+      }
+      if (Object.keys(updateData).length > 0) {
+        await supabase.from('clients').update(updateData).eq('id', data.id);
+      }
+      // Log enrichment
+      await supabase.from('activity_log').insert({
+        organisation_id: orgId, client_id: data.id, actor_type: 'system',
+        action: 'client_enriched', details: { sources: enriched.sources, fieldsUpdated: Object.keys(updateData) }
+      });
+    }).catch(err => console.error('[Enrichment] Background enrichment failed:', err));
 
     res.status(201).json({ success: true, data });
   })

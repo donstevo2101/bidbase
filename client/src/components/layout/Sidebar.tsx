@@ -19,6 +19,7 @@ const quickLinks = [
   { label: 'All Clients', href: '/clients' },
   { label: 'Pipeline', href: '/pipeline' },
   { label: 'Funders', href: '/funders' },
+  { label: 'Grant Discovery', href: '/grants' },
   { label: 'Agent Workspace', href: '/agents' },
 ];
 

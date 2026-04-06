@@ -1,10 +1,53 @@
 import { useParams, Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api } from '../../lib/api';
+import { toast } from 'sonner';
 import type { Client, Application, Document as DocType, ActivityLogEntry } from '@shared/types/database';
 
-const tabs = ['Overview', 'Applications', 'Documents', 'Timeline'] as const;
+interface EnrichmentSource {
+  name: string;
+  url?: string;
+  scrapedAt: string;
+}
+
+interface CompaniesHouseData {
+  companyNumber: string;
+  companyType: string;
+  companyStatus: string;
+  dateOfCreation: string;
+  registeredAddress: string;
+  sicCodes: string[];
+  officers: { name: string; role: string; appointedOn: string }[];
+  recentFilings: { description: string; date: string; type: string }[];
+}
+
+interface OnlinePresenceData {
+  linkedinUrl?: string;
+  websiteUrl?: string;
+  charityCommission?: {
+    registeredCharityNumber: string;
+    status: string;
+    activities: string;
+  };
+}
+
+interface GrantHistoryEntry {
+  funder: string;
+  amount: number;
+  date: string;
+  project: string;
+}
+
+interface EnrichmentResult {
+  companiesHouse?: CompaniesHouseData;
+  onlinePresence?: OnlinePresenceData;
+  grantHistory?: GrantHistoryEntry[];
+  publicRecords?: { summary: string };
+  sources: EnrichmentSource[];
+}
+
+const tabs = ['Overview', 'Applications', 'Documents', 'Timeline', 'Enrichment'] as const;
 type Tab = typeof tabs[number];
 
 const stageBadgeColors: Record<string, string> = {
@@ -256,7 +299,262 @@ export default function ClientDetailPage() {
             ))}
           </div>
         )}
+
+        {activeTab === 'Enrichment' && (
+          <EnrichmentTab client={client} />
+        )}
       </div>
+    </div>
+  );
+}
+
+function EnrichmentTab({ client }: { client: Client }) {
+  const [enrichmentData, setEnrichmentData] = useState<EnrichmentResult | null>(null);
+
+  const enrichMutation = useMutation({
+    mutationFn: () =>
+      api.post<EnrichmentResult>('/enrichment/enrich', {
+        clientName: client.name,
+        registeredNumber: client.registered_number,
+        clientId: client.id,
+      }),
+    onSuccess: (result) => {
+      if (result.success) {
+        setEnrichmentData(result.data);
+        toast.success('Enrichment complete');
+      } else {
+        toast.error('Enrichment failed');
+      }
+    },
+    onError: () => {
+      toast.error('Enrichment request failed');
+    },
+  });
+
+  return (
+    <div className="p-4 space-y-4">
+      {/* Enrich Now card */}
+      <div className="bg-white border border-[#e5e7eb] rounded-[6px] p-6">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-700">Company Data</h3>
+          <button
+            onClick={() => enrichMutation.mutate()}
+            disabled={enrichMutation.isPending}
+            className="px-4 py-2 bg-[#2563eb] text-white text-xs font-medium rounded-[6px] hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+          >
+            {enrichMutation.isPending && (
+              <svg className="animate-spin h-3.5 w-3.5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            )}
+            {enrichMutation.isPending ? 'Enriching...' : 'Enrich Now'}
+          </button>
+        </div>
+      </div>
+
+      {enrichmentData && (
+        <>
+          {/* Companies House */}
+          {enrichmentData.companiesHouse && (
+            <div className="bg-white border border-[#e5e7eb] rounded-[6px] p-6">
+              <h3 className="text-sm font-semibold text-slate-700 mb-4">Companies House</h3>
+              <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs mb-4">
+                <div className="flex justify-between">
+                  <dt className="text-slate-400">Company Number</dt>
+                  <dd className="text-slate-700 font-medium">{enrichmentData.companiesHouse.companyNumber}</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-slate-400">Type</dt>
+                  <dd className="text-slate-700 font-medium">{enrichmentData.companiesHouse.companyType}</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-slate-400">Status</dt>
+                  <dd className="text-slate-700 font-medium">{enrichmentData.companiesHouse.companyStatus}</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-slate-400">Date of Creation</dt>
+                  <dd className="text-slate-700 font-medium">{enrichmentData.companiesHouse.dateOfCreation}</dd>
+                </div>
+                <div className="col-span-2 flex justify-between">
+                  <dt className="text-slate-400">Registered Address</dt>
+                  <dd className="text-slate-700 font-medium">{enrichmentData.companiesHouse.registeredAddress}</dd>
+                </div>
+                <div className="col-span-2 flex justify-between">
+                  <dt className="text-slate-400">SIC Codes</dt>
+                  <dd className="text-slate-700 font-medium">{enrichmentData.companiesHouse.sicCodes.join(', ')}</dd>
+                </div>
+              </dl>
+
+              {/* Officers table */}
+              {enrichmentData.companiesHouse.officers.length > 0 && (
+                <>
+                  <h4 className="text-xs font-semibold text-slate-600 mb-2">Officers</h4>
+                  <table className="data-grid w-full text-xs mb-4">
+                    <thead>
+                      <tr className="bg-slate-100 border-b border-slate-300">
+                        <th className="text-left px-3 py-2 font-semibold text-slate-600">Name</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-600">Role</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-600">Appointed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {enrichmentData.companiesHouse.officers.map((officer, i) => (
+                        <tr key={i} className="border-b border-slate-100 hover:bg-slate-50">
+                          <td className="px-3 py-1.5 text-slate-800">{officer.name}</td>
+                          <td className="px-3 py-1.5 text-slate-600">{officer.role}</td>
+                          <td className="px-3 py-1.5 text-slate-600">{officer.appointedOn}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+
+              {/* Recent filings */}
+              {enrichmentData.companiesHouse.recentFilings.length > 0 && (
+                <>
+                  <h4 className="text-xs font-semibold text-slate-600 mb-2">Recent Filings</h4>
+                  <table className="data-grid w-full text-xs">
+                    <thead>
+                      <tr className="bg-slate-100 border-b border-slate-300">
+                        <th className="text-left px-3 py-2 font-semibold text-slate-600">Description</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-600">Type</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-600">Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {enrichmentData.companiesHouse.recentFilings.map((filing, i) => (
+                        <tr key={i} className="border-b border-slate-100 hover:bg-slate-50">
+                          <td className="px-3 py-1.5 text-slate-800">{filing.description}</td>
+                          <td className="px-3 py-1.5 text-slate-600">{filing.type}</td>
+                          <td className="px-3 py-1.5 text-slate-600">{filing.date}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Online Presence */}
+          {enrichmentData.onlinePresence && (
+            <div className="bg-white border border-[#e5e7eb] rounded-[6px] p-6">
+              <h3 className="text-sm font-semibold text-slate-700 mb-4">Online Presence</h3>
+              <dl className="space-y-2 text-xs">
+                {enrichmentData.onlinePresence.linkedinUrl && (
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">LinkedIn</dt>
+                    <dd>
+                      <a
+                        href={enrichmentData.onlinePresence.linkedinUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[#2563eb] hover:underline"
+                      >
+                        {enrichmentData.onlinePresence.linkedinUrl}
+                      </a>
+                    </dd>
+                  </div>
+                )}
+                {enrichmentData.onlinePresence.websiteUrl && (
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Website</dt>
+                    <dd>
+                      <a
+                        href={enrichmentData.onlinePresence.websiteUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[#2563eb] hover:underline"
+                      >
+                        {enrichmentData.onlinePresence.websiteUrl}
+                      </a>
+                    </dd>
+                  </div>
+                )}
+                {enrichmentData.onlinePresence.charityCommission && (
+                  <>
+                    <div className="flex justify-between">
+                      <dt className="text-slate-400">Charity Number</dt>
+                      <dd className="text-slate-700 font-medium">{enrichmentData.onlinePresence.charityCommission.registeredCharityNumber}</dd>
+                    </div>
+                    <div className="flex justify-between">
+                      <dt className="text-slate-400">Charity Status</dt>
+                      <dd className="text-slate-700 font-medium">{enrichmentData.onlinePresence.charityCommission.status}</dd>
+                    </div>
+                    <div className="flex justify-between">
+                      <dt className="text-slate-400">Activities</dt>
+                      <dd className="text-slate-700 font-medium max-w-md text-right">{enrichmentData.onlinePresence.charityCommission.activities}</dd>
+                    </div>
+                  </>
+                )}
+              </dl>
+            </div>
+          )}
+
+          {/* Grant History */}
+          {enrichmentData.grantHistory && enrichmentData.grantHistory.length > 0 && (
+            <div className="bg-white border border-[#e5e7eb] rounded-[6px] p-6">
+              <h3 className="text-sm font-semibold text-slate-700 mb-4">Grant History</h3>
+              <table className="data-grid w-full text-xs">
+                <thead>
+                  <tr className="bg-slate-100 border-b border-slate-300">
+                    <th className="text-left px-3 py-2 font-semibold text-slate-600">Funder</th>
+                    <th className="text-right px-3 py-2 font-semibold text-slate-600">Amount</th>
+                    <th className="text-left px-3 py-2 font-semibold text-slate-600">Date</th>
+                    <th className="text-left px-3 py-2 font-semibold text-slate-600">Project</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {enrichmentData.grantHistory.map((grant, i) => (
+                    <tr key={i} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="px-3 py-1.5 text-slate-800 font-medium">{grant.funder}</td>
+                      <td className="px-3 py-1.5 text-right text-slate-600">
+                        {typeof grant.amount === 'number' ? `£${grant.amount.toLocaleString()}` : '—'}
+                      </td>
+                      <td className="px-3 py-1.5 text-slate-600">{grant.date}</td>
+                      <td className="px-3 py-1.5 text-slate-600">{grant.project}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Public Records */}
+          {enrichmentData.publicRecords?.summary && (
+            <div className="bg-white border border-[#e5e7eb] rounded-[6px] p-6">
+              <h3 className="text-sm font-semibold text-slate-700 mb-4">Public Records</h3>
+              <p className="text-xs text-slate-600 whitespace-pre-wrap">{enrichmentData.publicRecords.summary}</p>
+            </div>
+          )}
+
+          {/* Sources */}
+          {enrichmentData.sources && enrichmentData.sources.length > 0 && (
+            <div className="bg-white border border-[#e5e7eb] rounded-[6px] p-6">
+              <h3 className="text-sm font-semibold text-slate-700 mb-3">Sources</h3>
+              <ul className="space-y-1.5">
+                {enrichmentData.sources.map((source, i) => (
+                  <li key={i} className="text-xs text-slate-600 flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
+                    {source.url ? (
+                      <a href={source.url} target="_blank" rel="noopener noreferrer" className="text-[#2563eb] hover:underline">
+                        {source.name}
+                      </a>
+                    ) : (
+                      <span>{source.name}</span>
+                    )}
+                    <span className="text-slate-400 text-[10px]">
+                      {new Date(source.scrapedAt).toLocaleString('en-GB')}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

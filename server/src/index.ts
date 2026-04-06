@@ -16,6 +16,7 @@ import { enterpriseRouter } from './routes/enterprise.js';
 import { reportsRouter } from './routes/reports.js';
 import { schedulerRouter } from './routes/scheduler.js';
 import { clientParserRouter } from './routes/clientParser.js';
+import { enrichmentRouter } from './routes/enrichment.js';
 
 const app = express();
 const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
@@ -53,6 +54,7 @@ app.use('/api/enterprise', enterpriseRouter);
 app.use('/api/reports', reportsRouter);
 app.use('/api/scheduler', schedulerRouter);
 app.use('/api/client-parser', clientParserRouter);
+app.use('/api/enrichment', enrichmentRouter);
 
 // Global error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
