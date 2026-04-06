@@ -391,16 +391,50 @@ async function checkDailyGrantScrape(orgId: string) {
       .lt('close_date', todayStr)
       .neq('status', 'closed');
 
+    // Sync funders from scraped grants into funders table
+    const { data: allGrantFunders } = await supabase
+      .from('grant_opportunities')
+      .select('funder, url, amount, eligibility')
+      .not('funder', 'is', null);
+
+    let newFunders = 0;
+    if (allGrantFunders) {
+      const seen = new Set<string>();
+      for (const g of allGrantFunders) {
+        const name = ((g.funder as string) ?? '').trim();
+        if (!name || name.length < 3 || seen.has(name.toLowerCase())) continue;
+        seen.add(name.toLowerCase());
+
+        const { data: existing } = await supabase
+          .from('funders')
+          .select('id')
+          .is('organisation_id', null)
+          .ilike('name', name)
+          .limit(1);
+
+        if (!existing || existing.length === 0) {
+          await supabase.from('funders').insert({
+            organisation_id: null,
+            name,
+            website: (g.url as string | null) ?? null,
+            verified: false,
+          });
+          newFunders++;
+        }
+      }
+    }
+
     state.lastGrantScrape = new Date();
 
     await logAction(orgId, 'daily_grant_scrape', {
       totalFound: opportunities.length,
       newGrants,
       updatedGrants,
+      newFunders,
       timestamp: new Date().toISOString(),
     });
 
-    console.log(`[Scheduler] Daily grant scrape complete for org ${orgId}: ${newGrants} new, ${updatedGrants} updated`);
+    console.log(`[Scheduler] Daily grant scrape complete for org ${orgId}: ${newGrants} new grants, ${updatedGrants} updated, ${newFunders} new funders`);
   } catch (err) {
     console.error(`[Scheduler] Daily grant scrape failed for org ${orgId}:`, err);
     await logAction(orgId, 'daily_grant_scrape_failed', { error: String(err) });

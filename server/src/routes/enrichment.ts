@@ -285,9 +285,124 @@ async function markExpiredGrantsClosed(): Promise<void> {
 }
 
 /**
+ * After scraping, sync unique funders from grant_opportunities into the funders table.
+ * Creates platform-wide funders (organisation_id = null) so they appear in the Funders nav tab.
+ */
+async function syncFundersFromGrants(): Promise<number> {
+  // Get all unique funder names from grant_opportunities
+  const { data: grantFunders } = await supabase
+    .from('grant_opportunities')
+    .select('funder, url, amount, eligibility, sectors, open_date, close_date')
+    .not('funder', 'is', null);
+
+  if (!grantFunders || grantFunders.length === 0) return 0;
+
+  // Deduplicate funder names
+  const funderMap = new Map<string, {
+    name: string;
+    website: string | null;
+    grantRangeMin: number | null;
+    grantRangeMax: number | null;
+    eligibleStructures: string[];
+    openRounds: Array<{ name: string; closes: string | null }>;
+    grantCount: number;
+  }>();
+
+  for (const g of grantFunders) {
+    const name = (g.funder as string).trim();
+    if (!name || name.length < 3) continue;
+
+    const existing = funderMap.get(name.toLowerCase());
+    if (existing) {
+      existing.grantCount++;
+      // Parse amount ranges
+      const amtMatch = (g.amount as string | null)?.match(/[\d,]+/g);
+      if (amtMatch) {
+        const nums = amtMatch.map((n: string) => parseInt(n.replace(/,/g, ''), 10)).filter((n: number) => !isNaN(n));
+        if (nums.length > 0) {
+          const min = Math.min(...nums);
+          const max = Math.max(...nums);
+          if (!existing.grantRangeMin || min < existing.grantRangeMin) existing.grantRangeMin = min;
+          if (!existing.grantRangeMax || max > existing.grantRangeMax) existing.grantRangeMax = max;
+        }
+      }
+      if (g.close_date) {
+        existing.openRounds.push({ name: 'Grant round', closes: g.close_date as string });
+      }
+    } else {
+      const amtMatch = (g.amount as string | null)?.match(/[\d,]+/g);
+      let gMin: number | null = null;
+      let gMax: number | null = null;
+      if (amtMatch) {
+        const nums = amtMatch.map((n: string) => parseInt(n.replace(/,/g, ''), 10)).filter((n: number) => !isNaN(n));
+        if (nums.length > 0) { gMin = Math.min(...nums); gMax = Math.max(...nums); }
+      }
+
+      // Extract eligible structures from eligibility text
+      const eligText = ((g.eligibility as string | null) ?? '').toLowerCase();
+      const structures: string[] = [];
+      if (eligText.includes('cic')) structures.push('CIC');
+      if (eligText.includes('charit')) structures.push('charity');
+      if (eligText.includes('social enterprise')) structures.push('social_enterprise');
+      if (eligText.includes('community group') || eligText.includes('constituted')) structures.push('community_group');
+
+      funderMap.set(name.toLowerCase(), {
+        name,
+        website: (g.url as string | null) ?? null,
+        grantRangeMin: gMin,
+        grantRangeMax: gMax,
+        eligibleStructures: structures,
+        openRounds: g.close_date ? [{ name: 'Grant round', closes: g.close_date as string }] : [],
+        grantCount: 1,
+      });
+    }
+  }
+
+  // Upsert each funder into the funders table (platform-wide: organisation_id = null)
+  let created = 0;
+  for (const [, funder] of funderMap) {
+    // Check if funder already exists
+    const { data: existing } = await supabase
+      .from('funders')
+      .select('id')
+      .is('organisation_id', null)
+      .ilike('name', funder.name)
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      // Update with latest data
+      await supabase.from('funders').update({
+        website: funder.website,
+        grant_range_min: funder.grantRangeMin,
+        grant_range_max: funder.grantRangeMax,
+        eligible_structures: funder.eligibleStructures.length > 0 ? funder.eligibleStructures : null,
+        open_rounds: funder.openRounds.length > 0 ? funder.openRounds : [],
+        last_updated: new Date().toISOString(),
+      }).eq('id', existing[0]!.id);
+    } else {
+      // Create new platform-wide funder
+      await supabase.from('funders').insert({
+        organisation_id: null,
+        name: funder.name,
+        website: funder.website,
+        grant_range_min: funder.grantRangeMin,
+        grant_range_max: funder.grantRangeMax,
+        eligible_structures: funder.eligibleStructures.length > 0 ? funder.eligibleStructures : null,
+        open_rounds: funder.openRounds.length > 0 ? funder.openRounds : [],
+        verified: false,
+      });
+      created++;
+    }
+  }
+
+  console.log(`[FunderSync] Synced ${funderMap.size} funders, ${created} new`);
+  return created;
+}
+
+/**
  * POST /grants/scrape
  * Triggers a full grant portal scrape and upserts results into the grant_opportunities table.
- * Preserves historical data — only adds new grants or updates changed fields.
+ * Also syncs unique funders into the funders table for the Funders nav tab.
  */
 enrichmentRouter.post(
   '/grants/scrape',
@@ -300,6 +415,9 @@ enrichmentRouter.post(
 
     // Mark expired grants as closed
     await markExpiredGrantsClosed();
+
+    // Sync funders from scraped grants into the funders table
+    const newFunders = await syncFundersFromGrants();
 
     // Get total count in database
     const { count: totalInDatabase } = await supabase
@@ -344,7 +462,7 @@ enrichmentRouter.post(
       actor_id: req.user.id,
       actor_type: 'user',
       action: 'grants_scraped',
-      details: { totalFound: opportunities.length, newGrants, updatedGrants, totalInDatabase: totalInDatabase ?? 0 },
+      details: { totalFound: opportunities.length, newGrants, updatedGrants, newFunders, totalInDatabase: totalInDatabase ?? 0 },
     });
 
     res.json({
@@ -353,6 +471,7 @@ enrichmentRouter.post(
         totalFound: opportunities.length,
         newGrants,
         updatedGrants,
+        newFunders,
         totalInDatabase: totalInDatabase ?? 0,
         opportunities,
       },
